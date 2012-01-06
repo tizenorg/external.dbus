@@ -1,0 +1,82 @@
+#!/usr/bin/make -f
+# Copyright ?2002,2003 Colin Walters <walters@verbum.org>
+# Copyright ?2003 Daniel Stone <daniels@debian.org>
+# Copyright ?2006 Sjoerd Simons <sjoerd@debian.org>
+
+include /usr/share/cdbs/1/rules/simple-patchsys.mk
+include /usr/share/cdbs/1/rules/utils.mk
+include /usr/share/cdbs/1/rules/debhelper.mk
+include /usr/share/cdbs/1/class/autotools.mk
+
+libdbusN := $(shell sed -rn 's/Package:[[:space:]]*(libdbus-[0-9-]+)[[:space:]]*$$/\1/p' debian/control | head -n 1)
+
+DEB_DH_MAKESHLIBS_ARGS_ALL = -V '$(libdbusN) (>= 1.1.1)'
+
+# List any files which are not installed
+common-binary-post-install-arch:: list-missing
+
+CFLAGS ?= -Wall -g
+LDFLAGS ?=
+PREFIX ?= /usr
+DATADIR ?= /opt
+ifneq (,$(findstring noopt,$(DEB_BUILD_OPTIONS)))
+        CFLAGS += -O0
+else
+        CFLAGS += -O2
+endif
+
+DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+ifneq (, $(findstring arm, $(DEB_HOST_ARCH)))
+	USE_MONOTONIC=yes
+else
+	USE_MONOTONIC=no
+endif
+
+ifneq (, $(findstring yes, $(USE_MONOTONIC)))
+	CFLAGS +=-DUSE_MONOTONIC
+	LDFLAGS +=-lrt
+endif
+
+LDFLAGS +=-L/$(PREFIX)/lib -lpthread -ldl
+
+DEB_CONFIGURE_SCRIPT := ./autogen.sh
+DEB_CONFIGURE_NORMAL_ARGS := --prefix="$(PREFIX)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"
+DEB_CONFIGURE_LIBEXECDIR := "/lib/dbus-1.0"
+
+DEB_CONFIGURE_EXTRA_FLAGS := \
+	--disable-xml-docs \
+	--enable-tests=no \
+	--with-session-socket-dir=/tmp \
+	--with-system-socket=/var/run/dbus/system_bus_socket \
+	--with-systemdsystemunitdir=/lib/systemd/system \
+	--with-dbus-user=root \
+	--with-system-pid-file=/tmp/run/dbus/pid
+
+DEB_DH_INSTALLINIT_ARGS := -r -- start 12 2 3 4 5 . stop  88 1 .
+
+build/dbus::
+	sed -e "s#@PREFIX@#$(PREFIX)#g" debian/dbus.install.in > debian/dbus.install
+	sed -i -e "s#@DATADIR@#$(DATADIR)#g" debian/dbus.install
+	
+build/libdbus-1-0::
+	sed -e "s#@PREFIX@#$(PREFIX)#g" debian/libdbus-1-0.install.in > debian/libdbus-1-0.install
+	sed -i -e "s#@DATADIR@#$(DATADIR)#g" debian/libdbus-1-0.install
+			        
+build/libdbus-1-dev::
+	sed -e "s#@PREFIX@#$(PREFIX)#g" debian/libdbus-1-dev.install.in > debian/libdbus-1-dev.install
+	sed -i -e "s#@DATADIR@#$(DATADIR)#g" debian/libdbus-1-dev.install
+
+install/dbus::
+	mkdir -p debian/tmp/etc/rc.d/rc3.d
+	cp debian/dbus-daemon_run debian/tmp/etc/rc.d/rc3.d/S30dbus-daemon_run
+	cp debian/system.conf debian/tmp/usr/etc/dbus-1/system.conf
+	chmod 755 debian/tmp/etc/rc.d/rc3.d/S30dbus-daemon_run
+
+install/libdbus-1-dev::
+	mkdir -p debian/libdbus-1-dev/usr/lib/pkgconfig
+	sed -e 's@-I\$${libdir}@-I$${prefix}/lib@' debian/tmp/usr/lib/pkgconfig/dbus-1.pc > debian/libdbus-1-dev/usr/lib/pkgconfig/dbus-1.pc
+
+clean::
+	rm -f test/data/valid-config-files/session.conf
+	rm -f test/data/valid-config-files/system.conf
+	rm -f dbus.devhelp

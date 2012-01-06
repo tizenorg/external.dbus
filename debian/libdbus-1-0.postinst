@@ -1,0 +1,16 @@
+#!/bin/sh
+if [ "${USER}" = "root" ]
+then
+	# change file owner
+	# 1. libraries
+	chown root:root /usr/lib/libdbus-1.so*
+	# 2. executables
+	# 3. configurations
+fi
+# Change file permissions
+# 1. libraries
+chmod 644 /usr/lib/libdbus-1.so*
+
+# 2. executables
+# 3. configurations
+

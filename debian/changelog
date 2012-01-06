@@ -1,0 +1,7 @@
+dbus (1.4.8-slp1) unstable; urgency=low
+
+  * Initial Release.
+  * Git: pkgs/d/dbus
+  * Tag: dbus_1.4.8-slp1
+
+ -- Sewook Park <sewook7.park@samsung.com>  Wed, 07 Dec 2011 12:55:49 +0900

@@ -1,0 +1,3 @@
+debian/tmp@PREFIX@/include/dbus*/dbus/dbus*.h
+debian/tmp@PREFIX@/lib/dbus-1.0/include/dbus/dbus*.h @PREFIX@/lib/dbus-1.0/include/dbus
+debian/tmp@PREFIX@/lib/libdbus-1*.a
