@@ -1,14 +1,13 @@
 Name:       dbus
 Summary:    D-Bus message bus
 Version:    1.4.8
-Release:    1
+Release:    3.1
 Group:      System/Libraries
 License:    GPLv2+ or AFL
 URL:        http://www.freedesktop.org/software/dbus/
 Source0:    http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
 Source1:    dbus-daemon_run
 Source2:    system.conf
-Requires:   %{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
 
@@ -19,23 +18,23 @@ for the systemwide message bus service, and as a per-user-login-session
 messaging facility.
 
 
-%package libs
+%package -n libdbus
 Summary:    Libraries for accessing D-Bus
 Group:      System/Libraries
 Requires:   %{name} = %{version}-%{release}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
-%description libs
+%description -n libdbus
 Lowlevel libraries for accessing D-Bus.
 
-%package devel
+%package -n libdbus-devel
 Summary:    Libraries and headers for D-Bus
 Group:      Development/Libraries
 Requires:   %{name} = %{version}-%{release}
 Requires:   pkgconfig
 
-%description devel
+%description -n libdbus-devel
 Headers and static libraries for D-Bus.
 
 %prep
@@ -66,25 +65,23 @@ mkdir -p %{buildroot}/etc/rc.d/init.d
 mkdir -p %{buildroot}/etc/rc.d/rc{3,4}.d
 mkdir -p %{buildroot}/usr/etc/dbus-1
 cp %{SOURCE1} %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
-cp %{SOURCE2} %{buildroot}/usr/etc/dbus-1/system.conf
+cp %{SOURCE2} %{buildroot}/etc/dbus-1/system.conf
+chmod 644 %{buildroot}/etc/dbus-1/system.conf
 chmod 755 %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run  %{buildroot}/etc/rc.d/rc3.d/S30dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
 
-%post
-
-
-%post libs 
+%post -n libdbus
 /sbin/ldconfig
 
 
-%postun libs -p /sbin/ldconfig
+%postun -n libdbus -p /sbin/ldconfig
 
 
 %files
 /etc/rc.d/init.d/*
 /etc/rc.d/rc?.d/*
-/usr/etc/dbus-1/*
+#/usr/etc/dbus-1/*
 %{_bindir}/dbus-cleanup-sockets
 %{_bindir}/dbus-daemon
 %{_bindir}/dbus-monitor
@@ -105,10 +102,10 @@ ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
 %dir %{_localstatedir}/run/dbus
 %dir %{_localstatedir}/lib/dbus
 
-%files libs
-/%{_libdir}/libdbus-1.so.3*
+%files -n libdbus
+%{_libdir}/libdbus-1.so.3*
 
-%files devel
+%files -n libdbus-devel
 %{_libdir}/libdbus-1.so
 %{_includedir}/dbus-1.0/dbus/dbus*.h
 %dir %{_libdir}/dbus-1.0
