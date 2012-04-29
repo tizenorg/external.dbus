@@ -5,7 +5,8 @@ Maintainer: Jayoun Lee <airjany@samsung.com>, Sewook Park <sewook7.park@samsung.
 Build-Depends: cdbs (>= 0.4.43),
                debhelper (>= 5.0.37.2),
                autotools-dev, libsm-dev,
-               libexpat-dev | libexpat1-dev
+               libexpat-dev | libexpat1-dev,
+               libx11-dev
 
 Package: dbus
 Architecture: any

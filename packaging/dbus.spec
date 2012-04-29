@@ -1,15 +1,17 @@
 Name:       dbus
 Summary:    D-Bus message bus
 Version:    1.4.8
-Release:    3.1
+Release:    1
 Group:      System/Libraries
 License:    GPLv2+ or AFL
 URL:        http://www.freedesktop.org/software/dbus/
 Source0:    http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
 Source1:    dbus-daemon_run
 Source2:    system.conf
+Requires:   %{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
+BuildRequires:  libx11-devel
 
 
 %description
@@ -18,23 +20,23 @@ for the systemwide message bus service, and as a per-user-login-session
 messaging facility.
 
 
-%package -n libdbus
+%package libs
 Summary:    Libraries for accessing D-Bus
 Group:      System/Libraries
 Requires:   %{name} = %{version}-%{release}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
-%description -n libdbus
+%description libs
 Lowlevel libraries for accessing D-Bus.
 
-%package -n libdbus-devel
+%package devel
 Summary:    Libraries and headers for D-Bus
 Group:      Development/Libraries
 Requires:   %{name} = %{version}-%{release}
 Requires:   pkgconfig
 
-%description -n libdbus-devel
+%description devel
 Headers and static libraries for D-Bus.
 
 %prep
@@ -71,11 +73,11 @@ chmod 755 %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run  %{buildroot}/etc/rc.d/rc3.d/S30dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
 
-%post -n libdbus
+%post libs 
 /sbin/ldconfig
 
 
-%postun -n libdbus -p /sbin/ldconfig
+%postun libs -p /sbin/ldconfig
 
 
 %files
@@ -102,10 +104,10 @@ ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
 %dir %{_localstatedir}/run/dbus
 %dir %{_localstatedir}/lib/dbus
 
-%files -n libdbus
-%{_libdir}/libdbus-1.so.3*
+%files libs
+/%{_libdir}/libdbus-1.so.3*
 
-%files -n libdbus-devel
+%files devel
 %{_libdir}/libdbus-1.so
 %{_includedir}/dbus-1.0/dbus/dbus*.h
 %dir %{_libdir}/dbus-1.0
