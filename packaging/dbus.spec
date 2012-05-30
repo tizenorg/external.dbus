@@ -8,6 +8,7 @@ URL:        http://www.freedesktop.org/software/dbus/
 Source0:    http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
 Source1:    dbus-daemon_run
 Source2:    system.conf
+Source1001: packaging/dbus.manifest 
 Requires:   %{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
@@ -43,6 +44,7 @@ Headers and static libraries for D-Bus.
 %setup -q -n %{name}-%{version}
 
 %build
+cp %{SOURCE1001} .
 
 CFLAGS="$CFLAGS -DUSE_MONOTONIC"
 LDFLAGS="$LDFLAGS -lrt"
@@ -81,6 +83,7 @@ ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
 
 
 %files
+%manifest dbus.manifest
 /etc/rc.d/init.d/*
 /etc/rc.d/rc?.d/*
 #/usr/etc/dbus-1/*
@@ -105,9 +108,11 @@ ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
 %dir %{_localstatedir}/lib/dbus
 
 %files libs
+%manifest dbus.manifest
 /%{_libdir}/libdbus-1.so.3*
 
 %files devel
+%manifest dbus.manifest
 %{_libdir}/libdbus-1.so
 %{_includedir}/dbus-1.0/dbus/dbus*.h
 %dir %{_libdir}/dbus-1.0
