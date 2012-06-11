@@ -1,0 +1,14 @@
+diff -uNrp dbus-1.5.10/bus/dbus.service.in dbus-1.5.10.patched//bus/dbus.service.in
+--- dbus-1.5.10/bus/dbus.service.in	2012-02-20 03:31:57.000000000 -0800
++++ dbus-1.5.10.patched//bus/dbus.service.in	2012-05-16 13:53:34.693898389 -0700
+@@ -3,6 +3,10 @@ Description=D-Bus System Message Bus
+ Requires=dbus.socket
+ After=syslog.target
+ 
++IOSchedulingClass=realtime
++IOSchedulingPriority=0
++CPUSchedulingPriority=99
++
+ [Service]
+ ExecStart=@EXPANDED_BINDIR@/dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation
+ ExecReload=@EXPANDED_BINDIR@/dbus-send --print-reply --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig

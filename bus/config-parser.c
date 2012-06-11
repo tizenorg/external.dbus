@@ -3271,11 +3271,12 @@ test_default_session_servicedirs (void)
   DBusList *dirs;
   DBusList *link;
   DBusString progs;
-  const char *common_progs;
   int i;
 
 #ifdef DBUS_WIN
+  const char *common_progs;
   char buffer[1024];
+
   if (_dbus_get_install_root(buffer, sizeof(buffer)))
     {
       strcat(buffer,DBUS_DATADIR);
@@ -3289,8 +3290,9 @@ test_default_session_servicedirs (void)
   if (!_dbus_string_init (&progs))
     _dbus_assert_not_reached ("OOM allocating progs");
 
-  common_progs = _dbus_getenv ("CommonProgramFiles");
 #ifndef DBUS_UNIX
+  common_progs = _dbus_getenv ("CommonProgramFiles");
+
   if (common_progs) 
     {
       if (!_dbus_string_append (&progs, common_progs)) 
@@ -3391,10 +3393,14 @@ test_default_session_servicedirs (void)
 static const char *test_system_service_dir_matches[] = 
         {
 #ifdef DBUS_UNIX
-         "/testusr/testlocal/testshare/dbus-1/system-services",
-         "/testusr/testshare/dbus-1/system-services",
+         "/usr/local/share/dbus-1/system-services",
+         "/usr/share/dbus-1/system-services",
 #endif
          DBUS_DATADIR"/dbus-1/system-services",
+#ifdef DBUS_UNIX
+         "/lib/dbus-1/system-services",
+#endif
+
 #ifdef DBUS_WIN
          NULL,
 #endif
@@ -3407,7 +3413,9 @@ test_default_system_servicedirs (void)
   DBusList *dirs;
   DBusList *link;
   DBusString progs;
+#ifndef DBUS_UNIX
   const char *common_progs;
+#endif
   int i;
 
   /* On Unix we don't actually use this variable, but it's easier to handle the
@@ -3415,8 +3423,9 @@ test_default_system_servicedirs (void)
   if (!_dbus_string_init (&progs))
     _dbus_assert_not_reached ("OOM allocating progs");
 
-  common_progs = _dbus_getenv ("CommonProgramFiles");
 #ifndef DBUS_UNIX
+  common_progs = _dbus_getenv ("CommonProgramFiles");
+
   if (common_progs) 
     {
       if (!_dbus_string_append (&progs, common_progs)) 

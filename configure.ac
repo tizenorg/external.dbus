@@ -2,8 +2,8 @@ dnl -*- mode: m4 -*-
 AC_PREREQ([2.63])
 
 m4_define([dbus_major_version], [1])
-m4_define([dbus_minor_version], [4])
-m4_define([dbus_micro_version], [8])
+m4_define([dbus_minor_version], [5])
+m4_define([dbus_micro_version], [10])
 m4_define([dbus_version],
           [dbus_major_version.dbus_minor_version.dbus_micro_version])
 AC_INIT([dbus],[dbus_version],[https://bugs.freedesktop.org/enter_bug.cgi?product=dbus],[dbus])
@@ -32,7 +32,7 @@ AC_DEFINE_UNQUOTED(DBUS_DAEMON_NAME,"dbus-daemon",[Name of executable])
 #
 
 ## increment if the interface has additions, changes, removals.
-LT_CURRENT=8
+LT_CURRENT=9
 
 ## increment any time the source changes; set to
 ##  0 if you increment CURRENT
@@ -41,7 +41,7 @@ LT_REVISION=5
 ## increment if any interfaces have been added; set to 0
 ## if any interfaces have been changed or removed. removal has
 ## precedence over adding, so set to 0 if both happened.
-LT_AGE=5
+LT_AGE=6
 
 AC_SUBST(LT_CURRENT)
 AC_SUBST(LT_REVISION)
@@ -68,6 +68,7 @@ AM_PROG_LIBTOOL
 AC_PROG_MKDIR_P
 COMPILER_COVERAGE
 COMPILER_OPTIMISATIONS
+PKG_PROG_PKG_CONFIG
 
 # Initialize libtool
 LT_INIT([win32-dll])
@@ -122,7 +123,6 @@ AM_CONDITIONAL(DBUS_WINCE, test "$dbus_wince" = yes)
 AM_CONDITIONAL(DBUS_UNIX, test "$dbus_unix" = yes)
 AM_CONDITIONAL(DBUS_CYGWIN, test "$dbus_cygwin" = yes)
 
-AC_ARG_ENABLE(tests, AS_HELP_STRING([--enable-tests],[enable unit test code in the library and binaries]),enable_tests=$enableval,enable_tests=$USE_MAINTAINER_MODE)
 AC_ARG_ENABLE(ansi, AS_HELP_STRING([--enable-ansi],[enable -ansi -pedantic gcc flags]),enable_ansi=$enableval,enable_ansi=no)
 AC_ARG_ENABLE(verbose-mode, AS_HELP_STRING([--enable-verbose-mode],[support verbose debug mode]),enable_verbose_mode=$enableval,enable_verbose_mode=$USE_MAINTAINER_MODE)
 AC_ARG_ENABLE(asserts, AS_HELP_STRING([--enable-asserts],[include assertion checks]),enable_asserts=$enableval,enable_asserts=$USE_MAINTAINER_MODE)
@@ -138,6 +138,7 @@ AC_ARG_ENABLE(kqueue, AS_HELP_STRING([--enable-kqueue],[build with kqueue suppor
 AC_ARG_ENABLE(console-owner-file, AS_HELP_STRING([--enable-console-owner-file],[enable console owner file]),enable_console_owner_file=$enableval,enable_console_owner_file=auto)
 AC_ARG_ENABLE(userdb-cache, AS_HELP_STRING([--enable-userdb-cache],[build with userdb-cache support]),enable_userdb_cache=$enableval,enable_userdb_cache=yes)
 AC_ARG_ENABLE(launchd, AS_HELP_STRING([--enable-launchd],[build with launchd auto-launch support]),enable_launchd=$enableval,enable_launchd=auto)
+AC_ARG_ENABLE(systemd, AS_HELP_STRING([--enable-systemd],[build with systemd at_console support]),enable_systemd=$enableval,enable_systemd=auto)
 
 AC_ARG_WITH(xml, AS_HELP_STRING([--with-xml=[libxml/expat]],[XML library to use (libxml may be named libxml2 on some systems)]))
 AC_ARG_WITH(init-scripts, AS_HELP_STRING([--with-init-scripts=[redhat]],[Style of init scripts to install]))
@@ -150,12 +151,104 @@ AC_ARG_WITH(console-owner-file, AS_HELP_STRING([--with-console-owner-file=[filen
 AC_ARG_WITH(launchd-agent-dir, AS_HELP_STRING([--with-launchd-agent-dir=[dirname]],[directory to put the launchd agent (default: /Library/LaunchAgents)]))
 AC_ARG_WITH(dbus_user, AS_HELP_STRING([--with-dbus-user=<user>],[User for running the DBUS daemon (messagebus)]))
 AC_ARG_WITH(dbus_daemondir, AS_HELP_STRING([--with-dbus-daemondir=[dirname]],[Directory for installing the DBUS daemon]))
+AC_ARG_WITH(dbus_session_bus_default_address, AS_HELP_STRING([--with-dbus-session-bus-default-address=[nonce-tcp:/autolaunch:/tcp:host:port]],[Transport Type to be used (default: nonce-tcp:)]),with_dbus_session_bus_default_address=$withval,with_dbus_session_bus_default_address=nonce-tcp:)
 
-dnl DBUS_BUILD_TESTS controls unit tests built in to .c files
-dnl and also some stuff in the test/ subdir
-AM_CONDITIONAL(DBUS_BUILD_TESTS, test x$enable_tests = xyes)
-if test x$enable_tests = xyes; then
-    AC_DEFINE(DBUS_BUILD_TESTS,1,[Build test code])
+AC_ARG_ENABLE([embedded-tests],
+  AS_HELP_STRING([--enable-embedded-tests],
+    [enable unit test code in the library and binaries]),
+  [], [enable_embedded_tests=$USE_MAINTAINER_MODE])
+AC_ARG_ENABLE([modular-tests],
+  AS_HELP_STRING([--enable-modular-tests],
+    [enable modular regression tests (requires GLib)]),
+  [], [enable_modular_tests=auto])
+# --enable-tests overrides both --enable-embedded-tests and
+# --enable-modular-tests
+AC_ARG_ENABLE([tests],
+  AS_HELP_STRING([--enable-tests],
+    [enable/disable all tests, overriding embedded-tests/modular-tests]),
+  [
+  if test "x$enableval" = xyes; then
+    AC_MSG_NOTICE([Full test coverage was requested with --enable-tests=yes])
+    AC_MSG_NOTICE([This has many dependencies (GLib, dbus-glib, Python)])
+  fi
+  enable_embedded_tests=$enableval
+  enable_modular_tests=$enableval
+  ],
+  [])
+
+# DBUS_ENABLE_EMBEDDED_TESTS controls unit tests built in to .c files
+# and also some stuff in the test/ subdir. DBUS_BUILD_TESTS was an older
+# name for this.
+AM_CONDITIONAL([DBUS_BUILD_TESTS], [test "x$enable_embedded_tests" = xyes])
+AM_CONDITIONAL([DBUS_ENABLE_EMBEDDED_TESTS],
+  [test "x$enable_embedded_tests" = xyes])
+if test "x$enable_embedded_tests" = xyes; then
+    AC_DEFINE([DBUS_ENABLE_EMBEDDED_TESTS], [1],
+      [Define to build test code into the library and binaries])
+    AC_DEFINE([DBUS_BUILD_TESTS], [1],
+      [Define to build test code into the library and binaries])
+fi
+
+# DBUS_ENABLE_MODULAR_TESTS controls tests that work based on public API.
+# These use GTest, from GLib, because life's too short. They're enabled by
+# default (unless you don't have GLib), because they don't bloat the library
+# or binaries.
+
+with_glib=yes
+
+if test "x$enable_modular_tests" != xno; then
+  PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.24, gio-2.0 >= 2.24],
+    [],
+    [if test "x$enable_modular_tests" = xyes; then
+      AC_MSG_NOTICE([Full test coverage (--enable-modular-tests=yes or --enable-tests=yes) requires GLib])
+      AC_MSG_ERROR([$GLIB_ERRORS])
+    else # assumed to be "auto"
+      with_glib=no
+    fi])
+  # If dbus-gmain.[ch] returned to libdbus then we wouldn't need this
+  PKG_CHECK_MODULES([DBUS_GLIB], [dbus-glib-1],
+    [],
+    [if test "x$enable_modular_tests" = xyes; then
+      AC_MSG_NOTICE([Full test coverage (--enable-modular-tests=yes or --enable-tests=yes) requires dbus-glib])
+      AC_MSG_ERROR([$DBUS_GLIB_ERRORS])
+    else # assumed to be "auto"
+      with_glib=no
+    fi])
+fi
+if test "x$enable_modular_tests" != xno; then
+  AC_DEFINE([DBUS_ENABLE_MODULAR_TESTS], [1],
+    [Define to build independent test binaries])
+fi
+AM_CONDITIONAL([DBUS_ENABLE_MODULAR_TESTS],
+  [test "x$enable_modular_tests" != xno])
+
+if test "x$with_glib" != xno; then
+  AC_DEFINE([DBUS_WITH_GLIB], [1],
+    [Define if GLib, GObject, GIO are available])
+fi
+AM_CONDITIONAL([DBUS_WITH_GLIB], [test "x$with_glib" != xno])
+
+AC_ARG_ENABLE([installed-tests],
+  AS_HELP_STRING([--enable-installed-tests],
+    [enable unit test code in the library and binaries]),
+  [], [enable_installed_tests=no])
+AM_CONDITIONAL([DBUS_ENABLE_INSTALLED_TESTS],
+  [test "x$enable_installed_tests" = xyes])
+
+if test "x$enable_tests" = xyes; then
+  # full test coverage is required, Python is a hard dependency
+  AC_MSG_NOTICE([Full test coverage (--enable-tests=yes) requires Python, dbus-python, pygobject])
+  AM_PATH_PYTHON([2.6])
+  AC_MSG_CHECKING([for Python modules for full test coverage])
+  if "$PYTHON" -c "import dbus, gobject, dbus.mainloop.glib"; then
+    AC_MSG_RESULT([yes])
+  else
+    AC_MSG_RESULT([no])
+    AC_MSG_ERROR([cannot import dbus, gobject, dbus.mainloop.glib Python modules])
+  fi
+else
+  # --enable-tests not given: do not abort if Python is missing
+  AM_PATH_PYTHON([2.6], [], [:])
 fi
 
 if test x$enable_verbose_mode = xyes; then
@@ -164,7 +257,7 @@ fi
 
 if test x$enable_asserts = xno; then
     AC_DEFINE(DBUS_DISABLE_ASSERT,1,[Disable assertion checking])
-    AC_DEFINE(G_DISABLE_ASSERT,1,[Disable GLib assertion macros])
+    DISABLE_UNUSED_WARNINGS="unused-label"
     R_DYNAMIC_LDFLAG=""
 else
     # -rdynamic is needed for glibc's backtrace_symbols to work.
@@ -182,6 +275,7 @@ AC_SUBST(R_DYNAMIC_LDFLAG)
 if test x$enable_checks = xno; then
     AC_DEFINE(DBUS_DISABLE_CHECKS,1,[Disable public API sanity checking])
     AC_DEFINE(G_DISABLE_CHECKS,1,[Disable GLib public API sanity checking])
+    DISABLE_UNUSED_WARNINGS="unused-label"
 fi
 
 if test x$enable_userdb_cache = xyes; then
@@ -228,6 +322,12 @@ AC_CHECK_SIZEOF(void *)
 AC_CHECK_SIZEOF(long long)
 AC_CHECK_SIZEOF(__int64)
 
+AC_ARG_WITH([64-bit],
+  [AS_HELP_STRING([--without-64-bit],
+    [If you have to use this option, please report it as a bug])],
+  [],
+  [with_64_bit=yes])
+
 ### See what our 64 bit type is called
 AC_MSG_CHECKING([64-bit integer type])
 
@@ -265,13 +365,32 @@ $ac_cv_sizeof___int64)
   ;;
 esac
 
-if test -z "$dbusint64" ; then
+AS_IF(
+  [test "x$with_64_bit" = xno],
+  [
         DBUS_INT64_TYPE="no_int64_type_detected"
         DBUS_HAVE_INT64=0
         DBUS_INT64_CONSTANT=
         DBUS_UINT64_CONSTANT=
-        AC_MSG_RESULT([none found])
-else
+        AC_MSG_RESULT([disabled via --without-64-bit])
+  ],
+  dnl else if
+  [test -z "$dbusint64"],
+  [AC_MSG_RESULT([not found])
+  AC_MSG_ERROR([Could not find a 64-bit integer type.
+
+Please report a bug here with details of your platform and compiler:
+
+    http://bugs.freedesktop.org/enter_bug.cgi?product=DBus&component=core
+
+To compile D-Bus with all 64-bit integer types removed (not recommended), use
+the option "--without-64-bit".
+
+This option is likely to be removed in future, unless you report that your
+platform needs it.])
+  ],
+  dnl else
+  [
         DBUS_INT64_TYPE="$dbusint64"
         DBUS_HAVE_INT64=1
         DBUS_INT64_CONSTANT="$dbusint64_constant"
@@ -280,7 +399,7 @@ else
 		AC_DEFINE_UNQUOTED(DBUS_INT64_PRINTF_MODIFIER, [$dbusint64_printf_modifier], [Define to printf modifier for 64 bit integer type])
 	fi
         AC_MSG_RESULT($DBUS_INT64_TYPE)
-fi
+  ])
 
 AC_SUBST(DBUS_INT64_TYPE)
 AC_SUBST(DBUS_INT64_CONSTANT)
@@ -357,7 +476,7 @@ dnl **********************************
 dnl we currently check for all three va_copy possibilities, so we get
 dnl all results in config.log for bug reports.
 AC_CACHE_CHECK([for an implementation of va_copy()],dbus_cv_va_copy,[
-	AC_LINK_IFELSE([#include <stdarg.h>
+	AC_LINK_IFELSE([AC_LANG_SOURCE([#include <stdarg.h>
 #include <stdlib.h>
 	static void f (int i, ...) {
 	va_list args1, args2;
@@ -370,12 +489,12 @@ AC_CACHE_CHECK([for an implementation of va_copy()],dbus_cv_va_copy,[
 	int main() {
 	  f (0, 42);
 	  return 0;
-	}],
+	}])],
 	[dbus_cv_va_copy=yes],
 	[dbus_cv_va_copy=no])
 ])
 AC_CACHE_CHECK([for an implementation of __va_copy()],dbus_cv___va_copy,[
-	AC_LINK_IFELSE([#include <stdarg.h>
+	AC_LINK_IFELSE([AC_LANG_SOURCE([#include <stdarg.h>
 #include <stdlib.h>
 	static void f (int i, ...) {
 	va_list args1, args2;
@@ -388,7 +507,7 @@ AC_CACHE_CHECK([for an implementation of __va_copy()],dbus_cv___va_copy,[
 	int main() {
 	  f (0, 42);
 	  return 0;
-	}],
+	}])],
 	[dbus_cv___va_copy=yes],
 	[dbus_cv___va_copy=no])
 ])
@@ -441,8 +560,8 @@ fi
 
 AC_CACHE_CHECK([whether $CC knows __sync_sub_and_fetch()],
   dbus_cv_sync_sub_and_fetch,
-  [AC_LINK_IFELSE(
-     AC_LANG_PROGRAM([], [[int a = 4; int b = __sync_sub_and_fetch(&a, 4); exit(b); ]]),
+  [AC_LINK_IFELSE([
+     AC_LANG_PROGRAM([[]], [[int a = 4; int b = __sync_sub_and_fetch(&a, 4); exit(b); ]])],
      [dbus_cv_sync_sub_and_fetch=yes],
      [dbus_cv_sync_sub_and_fetch=no])
   ])
@@ -460,6 +579,11 @@ AC_SEARCH_LIBS(socket,[socket network])
 AC_CHECK_FUNC(gethostbyname,,[AC_CHECK_LIB(nsl,gethostbyname)])
 
 AC_CHECK_FUNCS(vsnprintf vasprintf nanosleep usleep setenv clearenv unsetenv socketpair getgrouplist fpathconf setrlimit poll setlocale localeconv strtoll strtoull)
+
+AC_CHECK_HEADERS([syslog.h])
+if test "x$ac_cv_header_syslog_h" = "xyes"; then
+  AC_CHECK_DECLS([LOG_PERROR], [], [], [[#include <syslog.h>]])
+fi
 
 #### Check for broken poll; taken from Glib's configure
 
@@ -806,6 +930,8 @@ if $dbus_use_libxml; then
    XML_LIBS=$LIBXML_LIBS
    XML_CFLAGS=$LIBXML_CFLAGS
 fi
+AC_SUBST([XML_CFLAGS])
+AC_SUBST([XML_LIBS])
 
 # Thread lib detection
 AC_CHECK_FUNC(pthread_cond_timedwait,[AC_CHECK_LIB(pthread,pthread_cond_timedwait,
@@ -835,6 +961,8 @@ else
 fi
 fi
 LIBS="$save_libs"
+
+AC_SUBST([THREAD_LIBS])
 
 # SELinux detection
 if test x$enable_selinux = xno ; then
@@ -915,6 +1043,36 @@ fi
 
 AM_CONDITIONAL(DBUS_BUS_ENABLE_DNOTIFY_ON_LINUX, test x$have_dnotify = xyes)
 
+# For simplicity, we require the userland API for epoll_create1 at
+# compile-time (glibc 2.9), but we'll run on kernels that turn out
+# not to have it at runtime.
+AC_ARG_ENABLE([epoll],
+              [AS_HELP_STRING([--enable-epoll],[use epoll(4) on Linux])],
+              [enable_epoll=$enableval], [enable_epoll=auto])
+if test x$enable_epoll = xno; then
+    have_linux_epoll=no
+else
+    AC_MSG_CHECKING([for Linux epoll(4)])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM(
+        [
+        #ifndef __linux__
+        #error This is not Linux
+        #endif
+        #include <sys/epoll.h>
+        ],
+        [epoll_create1 (EPOLL_CLOEXEC);])],
+        [have_linux_epoll=yes],
+        [have_linux_epoll=no])
+    AC_MSG_RESULT([$have_linux_epoll])
+fi
+if test x$enable_epoll,$have_linux_epoll = xyes,no; then
+    AC_MSG_ERROR([epoll support explicitly enabled but not available])
+fi
+if test x$have_linux_epoll = xyes; then
+  AC_DEFINE([DBUS_HAVE_LINUX_EPOLL], 1, [Define to use epoll(4) on Linux])
+fi
+AM_CONDITIONAL([HAVE_LINUX_EPOLL], [test x$have_linux_epoll = xyes])
+
 # kqueue checks
 if test x$enable_kqueue = xno ; then
     have_kqueue=no
@@ -983,6 +1141,24 @@ fi
 
 AM_CONDITIONAL(HAVE_CONSOLE_OWNER_FILE, test x$have_console_owner_file = xyes)
 
+dnl systemd detection
+if test x$enable_systemd = xno ; then
+    have_systemd=no;
+else
+    PKG_CHECK_MODULES(SYSTEMD,
+        [libsystemd-login >= 32, libsystemd-daemon >= 32],
+        have_systemd=yes,
+        have_systemd=no)
+fi
+
+if test x$have_systemd = xyes; then
+    AC_DEFINE(HAVE_SYSTEMD,1,[Have systemd])
+fi
+
+if test x$enable_systemd = xyes -a x$have_systemd != xyes ; then
+    AC_MSG_ERROR([Explicitly requested systemd support, but systemd not found])
+fi
+
 # libaudit detection
 if test x$enable_libaudit = xno ; then
     have_libaudit=no;
@@ -1003,7 +1179,9 @@ if test x$have_libaudit = xyes ; then
     AC_DEFINE(HAVE_LIBAUDIT,1,[audit daemon SELinux support])
 fi
 
-# Check for ADT API
+AC_SUBST([SELINUX_LIBS])
+
+# Check for ADT API (Solaris Basic Security Mode auditing)
 AC_MSG_CHECKING(for ADT API)
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 #include <bsm/adt.h>
@@ -1019,6 +1197,7 @@ then
 else
    AC_MSG_RESULT(no)
 fi
+AC_SUBST([ADT_LIBS])
 
 # Check for SCM_RIGHTS
 AC_MSG_CHECKING([for SCM_RIGHTS])
@@ -1040,26 +1219,22 @@ if test x$dbus_win = xyes ; then
   fi
 fi
 
+AC_SUBST([NETWORK_libs])
+
+AC_ARG_WITH([valgrind],
+  [AS_HELP_STRING([--with-valgrind],
+     [Add instrumentation to help valgrind to understand our allocator])],
+  [],
+  [with_valgrind=no])
+
+if test x$with_valgrind != xno; then
+  PKG_CHECK_MODULES([VALGRIND], [valgrind >= 3.6])
+  AC_DEFINE([WITH_VALGRIND], [1], [Define to add Valgrind instrumentation])
+fi
+
 #### Set up final flags
-DBUS_CLIENT_CFLAGS=
-DBUS_CLIENT_LIBS="$THREAD_LIBS $NETWORK_libs"
-AC_SUBST(DBUS_CLIENT_CFLAGS)
-AC_SUBST(DBUS_CLIENT_LIBS)
-
-DBUS_BUS_CFLAGS="$XML_CFLAGS"
-DBUS_BUS_LIBS="$XML_LIBS $SELINUX_LIBS $THREAD_LIBS $ADT_LIBS $NETWORK_libs"
-AC_SUBST(DBUS_BUS_CFLAGS)
-AC_SUBST(DBUS_BUS_LIBS)
-
-DBUS_LAUNCHER_CFLAGS="$XML_CFLAGS"
-DBUS_LAUNCHER_LIBS="$XML_LIBS $THREAD_LIBS $NETWORK_libs"
-AC_SUBST(DBUS_LAUNCHER_CFLAGS)
-AC_SUBST(DBUS_LAUNCHER_LIBS)
-
-DBUS_TEST_CFLAGS=
-DBUS_TEST_LIBS="$THREAD_LIBS $NETWORK_libs"
-AC_SUBST(DBUS_TEST_CFLAGS)
-AC_SUBST(DBUS_TEST_LIBS)
+LIBDBUS_LIBS="$THREAD_LIBS $NETWORK_libs"
+AC_SUBST([LIBDBUS_LIBS])
 
 ### X11 detection
 DBUS_X_LIBS=
@@ -1075,9 +1250,6 @@ if test "x$dbus_win" = xyes; then
     fi
 
     enable_x11_autolaunch=no
-fi
-
-if test "x$enable_x11_autolaunch" = xno; then
     have_x11=no
 else
     AC_PATH_XTRA
@@ -1095,11 +1267,17 @@ if test "x$enable_x11_autolaunch,$have_x11" = xyes,no; then
     AC_MSG_ERROR([X11 auto-launch requires X headers/libraries])
 else
     # move from "auto" to "yes" or "no" if necessary
-    enable_x11_autolaunch="$have_x11"
+    if test "x$enable_x11_autolaunch" != xno; then
+        enable_x11_autolaunch="$have_x11"
+    fi
+fi
+
+if test "x$have_x11" = xyes ; then
+   AC_DEFINE([DBUS_BUILD_X11], [1], [Define to build X11 functionality])
 fi
 
 if test "x$enable_x11_autolaunch" = xyes ; then
-   AC_DEFINE([DBUS_BUILD_X11], [1], [Define to enable X11 auto-launch])
+   AC_DEFINE([DBUS_ENABLE_X11_AUTOLAUNCH], [1], [Define to enable X11 auto-launch])
 fi
 
 AC_SUBST([DBUS_X_CFLAGS])
@@ -1117,209 +1295,75 @@ cc_supports_flag() {
   test "x$rc" = xyes
 }
 
-ld_supports_flag() {
-  AC_MSG_CHECKING([whether $LD supports "$@"])
-  AC_LINK_IFELSE([AC_LANG_PROGRAM([[
-    int one(void) { return 1; }
-    int two(void) { return 2; }
-  ]], [[ two();  ]])],
-    [_ac_ld_flag_supported=yes],
-    [_ac_ld_flag_supported=no])
+TP_COMPILER_WARNINGS([WARNING_CFLAGS],
+  dnl Use -Werror by default if:
+  dnl - we're not on Windows (too many warnings), and
+  dnl - we're in maintainer mode (a D-Bus developer, not a distro or end-user)
+  dnl Override with --enable-Werror or --disable-Werror
+  [test x$dbus_win != xyes -a x$dbus_cygwin != xyes -a x$USE_MAINTAINER_MODE = xyes],
 
-  if test "$_ac_ld_flag_supported" = "yes"; then
-    rm -f conftest.c
-    touch conftest.c
-    if $CC -c conftest.c; then
-      ld_out=`$LD $@ -o conftest conftest.o 2>&1`
-      ld_ret=$?
-      if test $ld_ret -ne 0 ; then
-        _ac_ld_flag_supported=no
-      elif echo "$ld_out" | egrep 'option ignored|^usage:|unrecognized option|illegal option' >/dev/null ; then
-        _ac_ld_flag_supported=no
-      fi
-    fi
-    rm -f conftest.c conftest.o conftest
-  fi
+  dnl Enable these warnings if possible:
+  [all \
+   extra \
+   char-subscripts \
+   missing-declarations \
+   missing-prototypes \
+   nested-externs \
+   pointer-arith \
+   cast-align \
+   no-address \
+   float-equal \
+   declaration-after-statement \
+  ],
 
-  AC_MSG_RESULT($_ac_ld_flag_supported)
-  if test "$_ac_ld_flag_supported" = "yes" ; then
-    return 0
-  else
-    return 1
-  fi
-}
+  dnl Disable these warnings if possible, make them non-fatal if possible,
+  dnl and don't enable -Werror unless we succeeded.
+  dnl
+  dnl Intentional:
+  dnl - $DISABLE_UNUSED_WARNINGS disables unused-label warnings if not
+  dnl   checking or not asserting
+  dnl - missing field initializers being 0 is a C feature, not a bug
+  dnl - unused-parameter is to make writing callbacks less annoying
+  dnl
+  dnl To be fixed one day:
+  dnl - sign-compare and pointer-sign are workarounds for fd.o #17433
+  dnl - type-limits is probably a bug too, but having the rest of -Wextra
+  dnl   is better than nothing
+  [$DISABLE_UNUSED_WARNINGS \
+   missing-field-initializers \
+   unused-parameter \
+   sign-compare \
+   pointer-sign \
+   type-limits \
+  ])
 
-# Don't bother with -Werror on Windows for now, too many warnings
-if test x$dbus_win != xyes -a x$dbus_cygwin != xyes -a x$USE_MAINTAINER_MODE = xyes; then
-  if cc_supports_flag "-Werror"; then
-    CFLAGS="$CFLAGS -Werror"
-  fi
-fi
+if test "x$GCC" = "xyes"; then
+  # We're treating -fno-common like a warning: it makes the linker more
+  # strict, because on some systems the linker is *always* this strict
+  TP_ADD_COMPILER_FLAG([WARNING_CFLAGS], [-fno-common])
 
-dnl This whole "if" block is in m4 quotes ([]) because it uses them
-dnl for character ranges internally. m4 macros cannot be used inside this
-dnl block.
-[if test "x$GCC" = "xyes"; then
-  case " $CFLAGS " in
-  *[\ \	]-Wall[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wall" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wchar-subscripts[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wchar-subscripts" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wmissing-declarations[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wmissing-declarations" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wmissing-prototypes[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wmissing-prototypes" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wnested-externs[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wnested-externs" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wpointer-arith[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wpointer-arith" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wcast-align[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wcast-align" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wno-address[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wno-address" ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wfloat-equal[\ \	]*) ;;
-  *) if cc_supports_flag -Wfloat-equal; then
-        CFLAGS="$CFLAGS -Wfloat-equal"
-     fi
-     ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-Wdeclaration-after-statement[\ \	]*) ;;
-  *) if cc_supports_flag -Wdeclaration-after-statement; then
-        CFLAGS="$CFLAGS -Wdeclaration-after-statement"
-     fi
-     ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-fno-common[\ \	]*) ;;
-  *) if cc_supports_flag -fno-common; then
-        CFLAGS="$CFLAGS -fno-common"
-     fi
-     ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-fPIC[\ \	]*) ;;
-  *) if test x$dbus_win = xno && cc_supports_flag -fPIC; then
-        PIC_CFLAGS="-fPIC"
-        if ld_supports_flag -z,relro; then
-           PIC_LDFLAGS="-Wl,-z,relro"
-        fi
-     fi
-     ;;
-  esac
-
-  case " $CFLAGS " in
-  *[\ \	]-fPIE[\ \	]*) ;;
-  *) if test x$dbus_win = xno && cc_supports_flag -fPIE; then
-        PIE_CFLAGS="-fPIE"
-        if ld_supports_flag -z,relro; then
-           PIE_LDFLAGS="-pie -Wl,-z,relro"
-        else
-           PIE_LDFLAGS="-pie"
-        fi
-     fi
-     ;;
-  esac
-
-  ### Disabled warnings, and compiler flag overrides
-
-  # Let's just ignore unused for now
-  case " $CFLAGS " in
-  *[\ \	]-Wno-unused[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wno-unused" ;;
-  esac
-
-  # This group is for warnings we currently don't pass.
-  # We would like to, however.  Please fix.
-
-  # http://bugs.freedesktop.org/show_bug.cgi?id=17433
-  case " $CFLAGS " in
-  *[\ \	]-Wno-sign-compare[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -Wno-sign-compare" ;;
-  esac
-  case " $CFLAGS " in
-  *[\ \	]-Wno-pointer-sign[\ \	]*) ;;
-  *) if cc_supports_flag -Wno-pointer-sign; then
-        CFLAGS="$CFLAGS -Wno-pointer-sign"
-     fi
-     ;;
-  esac
-
-  # This one is special - it's not a warning override.
   # http://bugs.freedesktop.org/show_bug.cgi?id=10599
-  case " $CFLAGS " in
-  *[\ \	]-fno-strict-aliasing[\ \	]*) ;;
-  *) CFLAGS="$CFLAGS -fno-strict-aliasing" ;;
-  esac
-  ### End disabled warnings
+  TP_ADD_COMPILER_FLAG([WARNING_CFLAGS], [-fno-strict-aliasing])
 
   if test "x$enable_ansi" = "xyes"; then
-    case " $CFLAGS " in
-    *[\ \	]-ansi[\ \	]*) ;;
-    *) CFLAGS="$CFLAGS -ansi" ;;
-    esac
-
-    case " $CFLAGS " in
-    *[\ \	]-D_POSIX_C_SOURCE*) ;;
-    *) CFLAGS="$CFLAGS -D_POSIX_C_SOURCE=199309L" ;;
-    esac
-
-    case " $CFLAGS " in
-    *[\ \	]-D_BSD_SOURCE[\ \	]*) ;;
-    *) CFLAGS="$CFLAGS -D_BSD_SOURCE" ;;
-    esac
-
-    case " $CFLAGS " in
-    *[\ \	]-pedantic[\ \	]*) ;;
-    *) CFLAGS="$CFLAGS -pedantic" ;;
-    esac
+    TP_ADD_COMPILER_FLAG([WARNING_CFLAGS],
+      [-ansi -D_POSIX_C_SOURCE=199309L -D_BSD_SOURCE -pedantic])
   fi
-fi]
-
-AC_SUBST(PIC_CFLAGS)
-AC_SUBST(PIC_LDFLAGS)
-AC_SUBST(PIE_CFLAGS)
-AC_SUBST(PIE_LDFLAGS)
-
-if ld_supports_flag --gc-sections; then
-  SECTION_LDFLAGS="-Wl,--gc-sections $SECTION_LDFLAGS"
-  CFLAGS="-ffunction-sections -fdata-sections $CFLAGS"
 fi
-AC_SUBST(SECTION_FLAGS)
-AC_SUBST(SECTION_LDFLAGS)
-AC_MSG_RESULT($ac_gcsections)
+
+dnl In principle we should put WARNING_CFLAGS in each Makefile.am like
+dnl telepathy-glib does, since CFLAGS is meant to be reserved for the user...
+dnl but prepending to CFLAGS (so the user can override it with later CFLAGS)
+dnl is the next best thing
+CFLAGS="$WARNING_CFLAGS $CFLAGS"
 
 case $host_os in
     solaris*)
         # Solaris' C library apparently needs these runes to be threadsafe...
         CFLAGS="$CFLAGS -D_POSIX_PTHREAD_SEMANTICS -D_REENTRANT"
+        # ... and this opt-in to get file descriptor passing support
+        CFLAGS="$CFLAGS -D_XOPEN_SOURCE=500"
+        ;;
 esac
 
 ### Doxygen Documentation
@@ -1351,9 +1395,8 @@ fi
 AM_CONDITIONAL(DBUS_DOXYGEN_DOCS_ENABLED, test x$enable_doxygen_docs = xyes)
 AC_MSG_RESULT($enable_doxygen_docs)
 
-XSLTPROC=false
 AC_CHECK_PROGS([XSLTPROC], [xsltproc])
-AM_CONDITIONAL(DBUS_HAVE_XSLTPROC, test "$XSLTPROC" != false)
+AM_CONDITIONAL([DBUS_HAVE_XSLTPROC], [test "x$XSLTPROC" != "x"])
 
 ### XML Documentation
 
@@ -1437,7 +1480,12 @@ AM_CONDITIONAL(DBUS_INIT_SCRIPTS_CYGWIN, test x$with_init_scripts = xcygwin)
 ##### systemd unit files
 AC_ARG_WITH([systemdsystemunitdir],
 AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files]),
-        [], [with_systemdsystemunitdir=$($PKG_CONFIG --variable=systemdsystemunitdir systemd)])
+    [],
+    [
+    PKG_CHECK_EXISTS([systemd],
+      [with_systemdsystemunitdir=$($PKG_CONFIG --variable=systemdsystemunitdir systemd)],
+      [with_systemdsystemunitdir=no])
+    ])
 if test "x$with_systemdsystemunitdir" != xno; then
    AC_SUBST([systemdsystemunitdir], [$with_systemdsystemunitdir])
 fi
@@ -1538,31 +1586,19 @@ DBUS_PWD=`pwd`
 # Useful in a cross-compilation environment, where the tests are run on the host system.
 AC_ARG_WITH(dbus-test-dir, AS_HELP_STRING([--with-dbus-test-dir=[dirname]],[path where the tests tools are available]),
 			   DBUS_PWD=$withval)
-AC_DEFUN([TEST_PATH], [
-TEST_$1=${DBUS_PWD}/test/$2
-AC_DEFINE_UNQUOTED(TEST_$1, "$TEST_$1",
-                   [Full path to test file test/$2 in builddir])
-AC_SUBST(TEST_$1)
-])
-AC_DEFUN([TEST_PROG], [
-TEST_$1=${DBUS_PWD}/test/$2
-AC_DEFINE_UNQUOTED(TEST_$1, "$TEST_$1$EXEEXT",
-                   [Full path to test file test/$2 in builddir])
-AC_SUBST(TEST_$1)
-])
 
-TEST_PATH(VALID_SERVICE_DIR, data/valid-service-files)
-TEST_PATH(INVALID_SERVICE_DIR, data/invalid-service-files)
-TEST_PATH(VALID_SERVICE_SYSTEM_DIR, data/valid-service-files-system)
-TEST_PATH(INVALID_SERVICE_SYSTEM_DIR, data/invalid-service-files-system)
-TEST_PROG(SERVICE_BINARY, test-service)
-TEST_PROG(SHELL_SERVICE_BINARY, test-shell-service)
-TEST_PROG(EXIT_BINARY, test-exit)
-TEST_PROG(SEGFAULT_BINARY, test-segfault)
-TEST_PROG(SLEEP_FOREVER_BINARY, test-sleep-forever)
-TEST_PROG(PRIVSERVER_BINARY, name-test/test-privserver)
+DBUS_TEST_EXEC="$DBUS_PWD/test"
+DBUS_TEST_DATA="$DBUS_PWD/test/data"
 
-AC_DEFINE_UNQUOTED(TEST_BUS_BINARY, "$DBUS_PWD/bus/dbus-daemon$EXEEXT",
+AC_SUBST([DBUS_TEST_DATA])
+AC_SUBST([DBUS_TEST_EXEC])
+
+AC_DEFINE_UNQUOTED([DBUS_TEST_EXEC], ["$DBUS_TEST_EXEC"],
+                   [Full path to the daemon in the builddir])
+AC_DEFINE_UNQUOTED([DBUS_EXEEXT], ["$EXEEXT"],
+                   [Extension for executables, typically empty or .exe])
+
+AC_DEFINE_UNQUOTED(TEST_BUS_BINARY, ["$DBUS_PWD/bus/dbus-daemon$EXEEXT"],
                    [Full path to the daemon in the builddir])
 AC_SUBST(TEST_BUS_BINARY)
 
@@ -1593,6 +1629,15 @@ fi
 AC_SUBST(TEST_SOCKET_DIR)
 AC_DEFINE_UNQUOTED(DBUS_TEST_SOCKET_DIR, "$TEST_SOCKET_DIR", [Where to put test sockets])
 
+if test "x$dbus_unix" = xyes; then
+  TEST_LISTEN="unix:tmpdir=$TEST_SOCKET_DIR"
+else
+  TEST_LISTEN="tcp:host=localhost"
+fi
+AC_SUBST([TEST_LISTEN])
+AC_DEFINE_UNQUOTED([TEST_LISTEN], ["$TEST_LISTEN"],
+  [Listening address for regression tests])
+
 if ! test -z "$with_session_socket_dir" ; then
    DBUS_SESSION_SOCKET_DIR="$with_session_socket_dir"
 else
@@ -1602,7 +1647,7 @@ AC_DEFINE_UNQUOTED(DBUS_SESSION_SOCKET_DIR, "$DBUS_SESSION_SOCKET_DIR", [Where p
 AC_SUBST(DBUS_SESSION_SOCKET_DIR)
 
 if test x$dbus_win = xyes; then
-        DBUS_SESSION_BUS_DEFAULT_ADDRESS="nonce-tcp:"
+        DBUS_SESSION_BUS_DEFAULT_ADDRESS="$with_dbus_session_bus_default_address"
 elif test x$have_launchd = xyes; then
         DBUS_SESSION_BUS_DEFAULT_ADDRESS="launchd:env=DBUS_LAUNCHD_SESSION_BUS_SOCKET"
 else
@@ -1621,6 +1666,15 @@ AH_VERBATIM(_DARWIN_ENVIRON,
 # define environ (*_NSGetEnviron())
 #endif
 ])
+
+AC_ARG_ENABLE([stats],
+  [AS_HELP_STRING([--enable-stats],
+    [enable bus daemon usage statistics])],
+  [], [enable_stats=no])
+if test "x$enable_stats" = xyes; then
+  AC_DEFINE([DBUS_ENABLE_STATS], [1],
+    [Define to enable bus daemon usage statistics])
+fi
 
 AC_CONFIG_FILES([
 Doxyfile
@@ -1643,6 +1697,7 @@ test/name-test/Makefile
 doc/Makefile
 doc/dbus-daemon.1
 dbus-1.pc
+dbus-1-uninstalled.pc
 test/data/valid-config-files/debug-allow-all.conf
 test/data/valid-config-files/debug-allow-all-sha1.conf
 test/data/valid-config-files-system/debug-allow-all-pass.conf
@@ -1691,14 +1746,18 @@ echo "
 echo "
         Maintainer mode:          ${USE_MAINTAINER_MODE}
         gcc coverage profiling:   ${enable_compiler_coverage}
-        Building unit tests:      ${enable_tests}
+        Building embedded tests:  ${enable_embedded_tests}
+        Building modular tests:   ${enable_modular_tests}
+            - with GLib:          ${with_glib}
         Building verbose mode:    ${enable_verbose_mode}
         Building assertions:      ${enable_asserts}
         Building checks:          ${enable_checks}
+        Building bus stats API:   ${enable_stats}
         Building SELinux support: ${have_selinux}
         Building inotify support: ${have_inotify}
         Building dnotify support: ${have_dnotify}
         Building kqueue support:  ${have_kqueue}
+        Building systemd support: ${have_systemd}
         Building X11 code:        ${enable_x11}
         Building Doxygen docs:    ${enable_doxygen_docs}
         Building XML docs:        ${enable_xml_docs}
@@ -1723,11 +1782,11 @@ if test x$have_launchd = xyes; then
 fi
 echo
 
-if test x$enable_tests = xyes; then
+if test x$enable_embedded_tests = xyes; then
         echo "NOTE: building with unit tests increases the size of the installed library and renders it insecure."
 fi
-if test x$enable_tests = xyes -a x$enable_asserts = xno; then
-        echo "NOTE: building with unit tests but without assertions means tests may not properly report failures (this configuration is only useful when doing something like profiling the tests)"
+if test x$enable_embedded_tests = xyes -a x$enable_asserts = xno; then
+        echo "NOTE: building with embedded tests but without assertions means tests may not properly report failures (this configuration is only useful when doing something like profiling the tests)"
 fi
 if test x$enable_compiler_coverage = xyes; then
         echo "NOTE: building with coverage profiling is definitely for developers only."
@@ -1744,4 +1803,17 @@ fi
 if test x$dbus_use_libxml = xtrue; then
         echo
 	echo "WARNING: You have chosen to use libxml as your xml parser however this code path is not maintained by the D-Bus developers and if it breaks you get to keep the pieces.  If you have selected this option in err please reconfigure with expat (e.g. --with-xml=expat)."
+fi
+
+if test "x$DBUS_HAVE_INT64" = x0; then
+  AC_MSG_WARN([You have disabled 64-bit integers via --without-64-bit.
+
+  This removes parts of the standard D-Bus API and ABI (the 't' and 'x'
+  typecodes, the dbus_int64_t and dbus_uint64_t types, etc.) and should only be
+  used if your compiler lacks support for 64-bit integers. Please report a bug
+  with details of your platform and compiler.
+
+  This option is likely to be removed in future, unless the D-Bus developers
+  receive reports that it is still needed.
+  ])
 fi

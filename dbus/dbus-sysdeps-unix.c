@@ -90,6 +90,38 @@
 #define socklen_t int
 #endif
 
+#if defined (__sun) || defined (__sun__)
+/*
+ * CMS_SPACE etc. definitions for Solaris < 10, based on
+ *   http://mailman.videolan.org/pipermail/vlc-devel/2006-May/024402.html
+ * via
+ *   http://wiki.opencsw.org/porting-faq#toc10
+ *
+ * These are only redefined for Solaris, for now: if your OS needs these too,
+ * please file a bug. (Or preferably, improve your OS so they're not needed.)
+ */
+
+# ifndef CMSG_ALIGN
+#   ifdef __sun__
+#     define CMSG_ALIGN(len) _CMSG_DATA_ALIGN (len)
+#   else
+      /* aligning to sizeof (long) is assumed to be portable (fd.o#40235) */
+#     define CMSG_ALIGN(len) (((len) + sizeof (long) - 1) & \
+                              ~(sizeof (long) - 1))
+#   endif
+# endif
+
+# ifndef CMSG_SPACE
+#   define CMSG_SPACE(len) (CMSG_ALIGN (sizeof (struct cmsghdr)) + \
+                            CMSG_ALIGN (len))
+# endif
+
+# ifndef CMSG_LEN
+#   define CMSG_LEN(len) (CMSG_ALIGN (sizeof (struct cmsghdr)) + (len))
+# endif
+
+#endif /* Solaris */
+
 static dbus_bool_t
 _dbus_open_socket (int              *fd_p,
                    int               domain,
@@ -132,13 +164,6 @@ _dbus_open_socket (int              *fd_p,
     }
 }
 
-dbus_bool_t
-_dbus_open_tcp_socket (int              *fd,
-                       DBusError        *error)
-{
-  return _dbus_open_socket(fd, AF_INET, SOCK_STREAM, 0, error);
-}
-
 /**
  * Opens a UNIX domain socket (as in the socket() call).
  * Does not bind the socket.
@@ -149,7 +174,7 @@ _dbus_open_tcp_socket (int              *fd,
  * @param error return location for an error
  * @returns #FALSE if error is set
  */
-dbus_bool_t
+static dbus_bool_t
 _dbus_open_unix_socket (int              *fd,
                         DBusError        *error)
 {
@@ -826,8 +851,6 @@ _dbus_connect_unix_socket (const char     *path,
                       path, _dbus_strerror (errno));
 
       _dbus_close (fd, NULL);
-      fd = -1;
-
       return -1;
     }
 
@@ -836,8 +859,6 @@ _dbus_connect_unix_socket (const char     *path,
       _DBUS_ASSERT_ERROR_IS_SET (error);
 
       _dbus_close (fd, NULL);
-      fd = -1;
-
       return -1;
     }
 
@@ -1161,14 +1182,6 @@ _dbus_connect_tcp_socket_with_nonce (const char     *host,
   struct addrinfo hints;
   struct addrinfo *ai, *tmp;
 
-  _DBUS_ASSERT_ERROR_IS_CLEAR (error);
-
-  if (!_dbus_open_tcp_socket (&fd, error))
-    {
-      _DBUS_ASSERT_ERROR_IS_SET(error);
-      return -1;
-    }
-
   _DBUS_ASSERT_ERROR_IS_CLEAR(error);
 
   _DBUS_ZERO (hints);
@@ -1196,7 +1209,6 @@ _dbus_connect_tcp_socket_with_nonce (const char     *host,
                       _dbus_error_from_errno (errno),
                       "Failed to lookup host/port: \"%s:%s\": %s (%d)",
                       host, port, gai_strerror(res), res);
-      _dbus_close (fd, NULL);
       return -1;
     }
 
@@ -1311,13 +1323,14 @@ _dbus_listen_tcp_socket (const char     *host,
   hints.ai_flags = AI_ADDRCONFIG | AI_PASSIVE;
 
  redo_lookup_with_port:
+  ai = NULL;
   if ((res = getaddrinfo(host, port, &hints, &ai)) != 0 || !ai)
     {
       dbus_set_error (error,
                       _dbus_error_from_errno (errno),
                       "Failed to lookup host/port: \"%s:%s\": %s (%d)",
                       host ? host : "*", port, gai_strerror(res), res);
-      return -1;
+      goto failed;
     }
 
   tmp = ai;
@@ -2367,16 +2380,28 @@ _dbus_atomic_dec (DBusAtomic *atomic)
 #endif
 }
 
-#ifdef DBUS_BUILD_TESTS
-/** Gets our GID
- * @returns process GID
+/**
+ * Atomically get the value of an integer. It may change at any time
+ * thereafter, so this is mostly only useful for assertions.
+ *
+ * @param atomic pointer to the integer to get
+ * @returns the value at this moment
  */
-dbus_gid_t
-_dbus_getgid (void)
+dbus_int32_t
+_dbus_atomic_get (DBusAtomic *atomic)
 {
-  return getgid ();
-}
+#if DBUS_USE_SYNC
+  __sync_synchronize ();
+  return atomic->value;
+#else
+  dbus_int32_t res;
+
+  _DBUS_LOCK (atomic);
+  res = atomic->value;
+  _DBUS_UNLOCK (atomic);
+  return res;
 #endif
+}
 
 /**
  * Wrapper for poll().
@@ -2489,8 +2514,6 @@ void
 _dbus_get_current_time (long *tv_sec,
                         long *tv_usec)
 {
-  struct timeval t;
-
 #ifdef HAVE_MONOTONIC_CLOCK
   struct timespec ts;
   clock_gettime (CLOCK_MONOTONIC, &ts);
@@ -2500,6 +2523,8 @@ _dbus_get_current_time (long *tv_sec,
   if (tv_usec)
     *tv_usec = ts.tv_nsec / 1000;
 #else
+  struct timeval t;
+
   gettimeofday (&t, NULL);
 
   if (tv_sec)
@@ -2894,11 +2919,6 @@ _dbus_print_backtrace (void)
  *
  * Marks both file descriptors as close-on-exec
  *
- * @todo libdbus only uses this for the debug-pipe server, so in
- * principle it could be in dbus-sysdeps-util.c, except that
- * dbus-sysdeps-util.c isn't in libdbus when tests are enabled and the
- * debug-pipe server is used.
- *
  * @param fd1 return location for one end
  * @param fd2 return location for the other end
  * @param blocking #TRUE if pipe should be blocking
@@ -2978,14 +2998,60 @@ _dbus_full_duplex_pipe (int        *fd1,
  *
  * @param format a printf-style format string
  * @param args arguments for the format string
- * @returns length of the given format string and args
+ * @returns length of the given format string and args, or -1 if no memory
  */
 int
 _dbus_printf_string_upper_bound (const char *format,
                                  va_list     args)
 {
-  char c;
-  return vsnprintf (&c, 1, format, args);
+  char static_buf[1024];
+  int bufsize = sizeof (static_buf);
+  int len;
+
+  len = vsnprintf (static_buf, bufsize, format, args);
+
+  /* If vsnprintf() returned non-negative, then either the string fits in
+   * static_buf, or this OS has the POSIX and C99 behaviour where vsnprintf
+   * returns the number of characters that were needed, or this OS returns the
+   * truncated length.
+   *
+   * We ignore the possibility that snprintf might just ignore the length and
+   * overrun the buffer (64-bit Solaris 7), because that's pathological.
+   * If your libc is really that bad, come back when you have a better one. */
+  if (len == bufsize)
+    {
+      /* This could be the truncated length (Tru64 and IRIX have this bug),
+       * or the real length could be coincidentally the same. Which is it?
+       * If vsnprintf returns the truncated length, we'll go to the slow
+       * path. */
+      if (vsnprintf (static_buf, 1, format, args) == 1)
+        len = -1;
+    }
+
+  /* If vsnprintf() returned negative, we have to do more work.
+   * HP-UX returns negative. */
+  while (len < 0)
+    {
+      char *buf;
+
+      bufsize *= 2;
+
+      buf = dbus_malloc (bufsize);
+
+      if (buf == NULL)
+        return -1;
+
+      len = vsnprintf (buf, bufsize, format, args);
+      dbus_free (buf);
+
+      /* If the reported length is exactly the buffer size, round up to the
+       * next size, in case vsnprintf has been returning the truncated
+       * length */
+      if (len == bufsize)
+        len = -1;
+    }
+
+  return len;
 }
 
 /**
@@ -3257,7 +3323,7 @@ _dbus_get_autolaunch_address (const char *scope,
                               DBusString *address,
                               DBusError  *error)
 {
-#ifdef DBUS_BUILD_X11
+#ifdef DBUS_ENABLE_X11_AUTOLAUNCH
   /* Perform X11-based autolaunch. (We also support launchd-based autolaunch,
    * but that's done elsewhere, and if it worked, this function wouldn't
    * be called.) */
@@ -3349,8 +3415,19 @@ _dbus_read_local_machine_uuid (DBusGUID   *machine_id,
                                DBusError  *error)
 {
   DBusString filename;
+  dbus_bool_t b;
+
   _dbus_string_init_const (&filename, DBUS_MACHINE_UUID_FILE);
-  return _dbus_read_uuid_file (&filename, machine_id, create_if_not_found, error);
+
+  b = _dbus_read_uuid_file (&filename, machine_id, create_if_not_found, error);
+  if (b)
+    return TRUE;
+
+  dbus_error_free (error);
+
+  /* Fallback to the system machine ID */
+  _dbus_string_init_const (&filename, "/etc/machine-id");
+  return _dbus_read_uuid_file (&filename, machine_id, FALSE, error);
 }
 
 #define DBUS_UNIX_STANDARD_SESSION_SERVICEDIR "/dbus-1/services"
@@ -3406,10 +3483,10 @@ _dbus_lookup_launchd_socket (DBusString *socket_path,
 #endif
 }
 
+#ifdef DBUS_ENABLE_LAUNCHD
 static dbus_bool_t
 _dbus_lookup_session_address_launchd (DBusString *address, DBusError  *error)
 {
-#ifdef DBUS_ENABLE_LAUNCHD
   dbus_bool_t valid_socket;
   DBusString socket_path;
 
@@ -3451,12 +3528,8 @@ _dbus_lookup_session_address_launchd (DBusString *address, DBusError  *error)
 
   _dbus_string_free(&socket_path);
   return TRUE;
-#else
-  dbus_set_error(error, DBUS_ERROR_NOT_SUPPORTED,
-                "can't lookup session address from launchd; launchd support not compiled in");
-  return FALSE;
-#endif
 }
+#endif
 
 /**
  * Determines the address of the session bus by querying a
@@ -3607,48 +3680,27 @@ _dbus_get_standard_session_servicedirs (DBusList **dirs)
 dbus_bool_t
 _dbus_get_standard_system_servicedirs (DBusList **dirs)
 {
-  const char *xdg_data_dirs;
+  /*
+   * DBUS_DATADIR may be the same as one of the standard directories. However,
+   * the config parser should take care of the duplicates.
+   *
+   * Also, append /lib as counterpart of /usr/share on the root
+   * directory (the root directory does not know /share), in order to
+   * facilitate early boot system bus activation where /usr might not
+   * be available.
+   */
+  static const char standard_search_path[] =
+    "/usr/local/share:"
+    "/usr/share:"
+    DBUS_DATADIR ":"
+    "/lib";
   DBusString servicedir_path;
 
-  if (!_dbus_string_init (&servicedir_path))
-    return FALSE;
+  _dbus_string_init_const (&servicedir_path, standard_search_path);
 
-  xdg_data_dirs = _dbus_getenv ("XDG_DATA_DIRS");
-
-  if (xdg_data_dirs != NULL)
-    {
-      if (!_dbus_string_append (&servicedir_path, xdg_data_dirs))
-        goto oom;
-
-      if (!_dbus_string_append (&servicedir_path, ":"))
-        goto oom;
-    }
-  else
-    {
-      if (!_dbus_string_append (&servicedir_path, "/usr/local/share:/usr/share:"))
-        goto oom;
-    }
-
-  /*
-   * add configured datadir to defaults
-   * this may be the same as an xdg dir
-   * however the config parser should take
-   * care of duplicates
-   */
-  if (!_dbus_string_append (&servicedir_path, DBUS_DATADIR":"))
-        goto oom;
-
-  if (!_dbus_split_paths_and_append (&servicedir_path,
-                                     DBUS_UNIX_STANDARD_SYSTEM_SERVICEDIR,
-                                     dirs))
-    goto oom;
-
-  _dbus_string_free (&servicedir_path);
-  return TRUE;
-
- oom:
-  _dbus_string_free (&servicedir_path);
-  return FALSE;
+  return _dbus_split_paths_and_append (&servicedir_path,
+                                       DBUS_UNIX_STANDARD_SYSTEM_SERVICEDIR,
+                                       dirs);
 }
 
 /**

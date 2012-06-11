@@ -29,6 +29,42 @@
 
 #include <string.h>
 
+#if defined(__GNUC__) && (__GNUC__ >= 4)
+# define _DBUS_ASSERT_ALIGNMENT(type, op, val) \
+  _DBUS_STATIC_ASSERT (__extension__ __alignof__ (type) op val)
+#else
+  /* not gcc, so probably no alignof operator: just use a no-op statement
+   * that's valid in the same contexts */
+# define _DBUS_ASSERT_ALIGNMENT(type, op, val) \
+  _DBUS_STATIC_ASSERT (TRUE)
+#endif
+
+/* True by definition, but just for completeness... */
+_DBUS_STATIC_ASSERT (sizeof (char) == 1);
+_DBUS_ASSERT_ALIGNMENT (char, ==, 1);
+
+_DBUS_STATIC_ASSERT (sizeof (dbus_int16_t) == 2);
+_DBUS_ASSERT_ALIGNMENT (dbus_int16_t, <=, 2);
+_DBUS_STATIC_ASSERT (sizeof (dbus_uint16_t) == 2);
+_DBUS_ASSERT_ALIGNMENT (dbus_uint16_t, <=, 2);
+
+_DBUS_STATIC_ASSERT (sizeof (dbus_int32_t) == 4);
+_DBUS_ASSERT_ALIGNMENT (dbus_int32_t, <=, 4);
+_DBUS_STATIC_ASSERT (sizeof (dbus_uint32_t) == 4);
+_DBUS_ASSERT_ALIGNMENT (dbus_uint32_t, <=, 4);
+_DBUS_STATIC_ASSERT (sizeof (dbus_bool_t) == 4);
+_DBUS_ASSERT_ALIGNMENT (dbus_bool_t, <=, 4);
+
+_DBUS_STATIC_ASSERT (sizeof (double) == 8);
+_DBUS_ASSERT_ALIGNMENT (double, <=, 8);
+
+#ifdef DBUS_HAVE_INT64
+_DBUS_STATIC_ASSERT (sizeof (dbus_int64_t) == 8);
+_DBUS_ASSERT_ALIGNMENT (dbus_int64_t, <=, 8);
+_DBUS_STATIC_ASSERT (sizeof (dbus_uint64_t) == 8);
+_DBUS_ASSERT_ALIGNMENT (dbus_uint64_t, <=, 8);
+#endif
+
 /**
  * @defgroup DBusMarshal marshaling and unmarshaling
  * @ingroup  DBusInternals
@@ -1228,44 +1264,6 @@ _dbus_type_get_alignment (int typecode)
     default:
       _dbus_assert_not_reached ("unknown typecode in _dbus_type_get_alignment()");
       return 0;
-    }
-}
-
-
-/**
- * Return #TRUE if the typecode is a valid typecode.
- * #DBUS_TYPE_INVALID surprisingly enough is not considered valid, and
- * random unknown bytes aren't either. This function is safe with
- * untrusted data.
- *
- * @returns #TRUE if valid
- */
-dbus_bool_t
-_dbus_type_is_valid (int typecode)
-{
-  switch (typecode)
-    {
-    case DBUS_TYPE_BYTE:
-    case DBUS_TYPE_BOOLEAN:
-    case DBUS_TYPE_INT16:
-    case DBUS_TYPE_UINT16:
-    case DBUS_TYPE_INT32:
-    case DBUS_TYPE_UINT32:
-    case DBUS_TYPE_INT64:
-    case DBUS_TYPE_UINT64:
-    case DBUS_TYPE_DOUBLE:
-    case DBUS_TYPE_STRING:
-    case DBUS_TYPE_OBJECT_PATH:
-    case DBUS_TYPE_SIGNATURE:
-    case DBUS_TYPE_ARRAY:
-    case DBUS_TYPE_STRUCT:
-    case DBUS_TYPE_DICT_ENTRY:
-    case DBUS_TYPE_VARIANT:
-    case DBUS_TYPE_UNIX_FD:
-      return TRUE;
-
-    default:
-      return FALSE;
     }
 }
 
