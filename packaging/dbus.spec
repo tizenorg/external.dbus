@@ -8,6 +8,7 @@ URL:        http://www.freedesktop.org/software/dbus/
 Source0:    %{name}-%{version}.tar.gz
 Source1:    dbus-user.socket
 Source2:    dbus-user.service
+Source3:    dbus-daemon_run
 Source1001: packaging/dbus.manifest 
 Patch1:     0001-Enable-checking-of-smack-context-from-DBus-interface.patch
 Patch2:     0002-Enforce-smack-policy-from-conf-file.patch
@@ -89,6 +90,15 @@ mkdir -p %{buildroot}%{_libdir}/systemd/user
 install -m0644 %{SOURCE1} %{buildroot}%{_libdir}/systemd/user/dbus.socket
 install -m0644 %{SOURCE2} %{buildroot}%{_libdir}/systemd/user/dbus.service
 
+
+mkdir -p %{buildroot}%{_sysconfdir}/rc.d/init.d
+mkdir -p %{buildroot}%{_sysconfdir}/rc.d/rc{3,4}.d
+cp %{SOURCE3} %{buildroot}%{_sysconfdir}/rc.d/init.d/dbus-daemon_run
+chmod 755 %{buildroot}%{_sysconfdir}/rc.d/init.d/dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run  %{buildroot}%{_sysconfdir}/rc.d/rc3.d/S30dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc4.d/S30dbus-daemon_run
+
+
 %remove_docs
 
 
@@ -99,6 +109,8 @@ install -m0644 %{SOURCE2} %{buildroot}%{_libdir}/systemd/user/dbus.service
 
 %files
 %manifest dbus.manifest
+%{_sysconfdir}/rc.d/init.d/*
+%{_sysconfdir}/rc.d/rc?.d/*
 %{_bindir}/dbus-cleanup-sockets
 %{_bindir}/dbus-daemon
 %{_bindir}/dbus-monitor

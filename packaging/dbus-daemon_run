@@ -1,0 +1,11 @@
+#!/bin/sh
+
+if [ ! -d /var/run/dbus ] ; then
+	mkdir -p /var/run/dbus
+fi
+
+if [ ! -d /tmp/run/dbus ] ; then
+	mkdir -p /tmp/run/dbus
+fi
+
+dbus-daemon --system
