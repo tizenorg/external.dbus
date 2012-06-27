@@ -1,3 +1,6 @@
+* Wed Jun 27 2012 Patrick McCarty <patrick.mccarty@linux.intel.com> - 1.5.10
+- Enable systemd support for dbus
+
 * Wed Jun 13 2012 Patrick McCarty <patrick.mccarty@linux.intel.com> - 1.5.10
 - Add a git tag for OBS promotion
 - Re-add init script for sysvinit compatibility

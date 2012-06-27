@@ -20,6 +20,8 @@ BuildRequires:  libcap-devel
 BuildRequires:  libtool
 BuildRequires:  libx11-devel
 BuildRequires:  pkgconfig(libsmack)
+BuildRequires:  pkgconfig(libsystemd-daemon)
+BuildRequires:  pkgconfig(libsystemd-login)
 
 
 %description
@@ -73,7 +75,7 @@ cp %{SOURCE1001} .
     --with-dbus-user=dbus \
     --with-systemdsystemunitdir=%{_libdir}/systemd/system \
     --enable-smack \
-    --disable-systemd
+    --enable-systemd
 
 make %{?jobs:-j%jobs}
 
