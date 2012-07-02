@@ -1,3 +1,8 @@
+* Mon Jul 2 2012 Brad Peters <brad.t.peters@intel.com> - 1.5.10
+- Removing CPU and IO priority throttling. Seeing problems with 
+   this support, causing random service failure. Will re-add later, 
+   once we get a base image working on systemd 
+
 * Wed Jun 27 2012 Patrick McCarty <patrick.mccarty@linux.intel.com> - 1.5.10
 - Enable systemd support for dbus
 
