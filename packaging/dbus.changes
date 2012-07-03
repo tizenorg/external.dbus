@@ -1,3 +1,6 @@
+* Mon Jul 3 2012 Brad Peters <brad.t.peters@intel.com> - 1.5.10
+- Pushing tag for OBS
+
 * Mon Jul 2 2012 Brad Peters <brad.t.peters@intel.com> - 1.5.10
 - Removing CPU and IO priority throttling. Seeing problems with 
    this support, causing random service failure. Will re-add later, 
