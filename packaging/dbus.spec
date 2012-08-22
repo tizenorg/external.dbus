@@ -1,7 +1,8 @@
+#sbs-git:slp/pkgs/d/dbus dbus 1.4.8 f63fbb6b0e1581671325ae81dc013cbd29d9b10e
 Name:       dbus
 Summary:    D-Bus message bus
-Version:    1.4.8
-Release:    1
+Version: 1.4.8
+Release:    4
 Group:      System/Libraries
 License:    GPLv2+ or AFL
 URL:        http://www.freedesktop.org/software/dbus/
@@ -68,10 +69,14 @@ mkdir -p %{buildroot}/etc/rc.d/rc{3,4}.d
 mkdir -p %{buildroot}/usr/etc/dbus-1
 cp %{SOURCE1} %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
 cp %{SOURCE2} %{buildroot}/etc/dbus-1/system.conf
-chmod 644 %{buildroot}/etc/dbus-1/system.conf
 chmod 755 %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
-ln -s ../init.d/dbus-daemon_run  %{buildroot}/etc/rc.d/rc3.d/S30dbus-daemon_run
-ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S30dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run  %{buildroot}/etc/rc.d/rc3.d/S04dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S04dbus-daemon_run
+
+
+%post
+mkdir -p /opt/var/lib/dbus
+
 
 %post libs 
 /sbin/ldconfig
