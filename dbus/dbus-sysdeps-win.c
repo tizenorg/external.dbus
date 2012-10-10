@@ -549,6 +549,10 @@ int _dbus_printf_string_upper_bound (const char *format,
       bufsize *= 2;
 
       p = malloc (bufsize);
+
+      if (p == NULL)
+        return -1;
+
       len = _vsnprintf (p, bufsize - 1, format, args);
       free (p);
     }
@@ -795,11 +799,6 @@ failed:
  * Creates a full-duplex pipe (as in socketpair()).
  * Sets both ends of the pipe nonblocking.
  *
- * @todo libdbus only uses this for the debug-pipe server, so in
- * principle it could be in dbus-sysdeps-util.c, except that
- * dbus-sysdeps-util.c isn't in libdbus when tests are enabled and the
- * debug-pipe server is used.
- * 
  * @param fd1 return location for one end
  * @param fd2 return location for the other end
  * @param blocking #TRUE if pipe should be blocking
@@ -816,9 +815,6 @@ _dbus_full_duplex_pipe (int        *fd1,
   struct sockaddr_in saddr;
   int len;
   u_long arg;
-  fd_set read_set, write_set;
-  struct timeval tv;
-  int res;
 
   _dbus_win_startup_winsock ();
 
@@ -954,7 +950,6 @@ _dbus_poll (DBusPollFD *fds,
   msgp += sprintf (msgp, "WSAEventSelect: to=%d\n\t", timeout_milliseconds);
   for (i = 0; i < n_fds; i++)
     {
-      static dbus_bool_t warned = FALSE;
       DBusPollFD *fdp = &fds[i];
 
 
@@ -1092,7 +1087,6 @@ _dbus_poll (DBusPollFD *fds,
   msgp += sprintf (msgp, "select: to=%d\n\t", timeout_milliseconds);
   for (i = 0; i < n_fds; i++)
     {
-      static dbus_bool_t warned = FALSE;
       DBusPollFD *fdp = &fds[i];
 
 
@@ -1878,14 +1872,15 @@ _dbus_sleep_milliseconds (int milliseconds)
 
 
 /**
- * Get current time, as in gettimeofday().
+ * Get current time, as in gettimeofday(). Never uses the monotonic
+ * clock.
  *
  * @param tv_sec return location for number of seconds
  * @param tv_usec return location for number of microseconds
  */
 void
-_dbus_get_current_time (long *tv_sec,
-                        long *tv_usec)
+_dbus_get_real_time (long *tv_sec,
+                     long *tv_usec)
 {
   FILETIME ft;
   dbus_uint64_t time64;
@@ -1907,6 +1902,20 @@ _dbus_get_current_time (long *tv_sec,
     *tv_usec = time64 % 1000000;
 }
 
+/**
+ * Get current time, as in gettimeofday(). Use the monotonic clock if
+ * available, to avoid problems when the system time changes.
+ *
+ * @param tv_sec return location for number of seconds
+ * @param tv_usec return location for number of microseconds
+ */
+void
+_dbus_get_monotonic_time (long *tv_sec,
+                          long *tv_usec)
+{
+  /* no implementation yet, fall back to wall-clock time */
+  _dbus_get_real_time (tv_sec, tv_usec);
+}
 
 /**
  * signal (SIGPIPE, SIG_IGN);
@@ -2619,9 +2628,7 @@ dbus_bool_t
 _dbus_daemon_is_session_bus_address_published (const char *scope)
 {
   HANDLE lock;
-  HANDLE mutex;
   DBusString mutex_name;
-  DWORD ret;
 
   if (!_dbus_get_mutex_name(&mutex_name,scope))
     {
@@ -2638,6 +2645,10 @@ _dbus_daemon_is_session_bus_address_published (const char *scope)
   // we use CreateMutex instead of OpenMutex because of possible race conditions,
   // see http://msdn.microsoft.com/en-us/library/ms684315%28VS.85%29.aspx
   hDBusDaemonMutex = CreateMutexA( NULL, FALSE, _dbus_string_get_const_data(&mutex_name) );
+
+  /* The client uses mutex ownership to detect a running server, so the server should do so too.
+     Fortunally the client deletes the mutex in the lock protected area, so checking presence 
+     will work too.  */
 
   _dbus_global_unlock( lock );
 
@@ -2662,8 +2673,6 @@ _dbus_daemon_publish_session_bus_address (const char* address, const char *scope
 {
   HANDLE lock;
   char *shared_addr = NULL;
-  DWORD ret;
-  char addressInfo[1024];
   DBusString shm_name;
   DBusString mutex_name;
 
@@ -2683,6 +2692,14 @@ _dbus_daemon_publish_session_bus_address (const char* address, const char *scope
       hDBusDaemonMutex = CreateMutexA( NULL, FALSE, _dbus_string_get_const_data(&mutex_name) );
     }
   _dbus_string_free( &mutex_name );
+
+  // acquire the mutex
+  if (WaitForSingleObject( hDBusDaemonMutex, 10 ) != WAIT_OBJECT_0)
+    {
+      _dbus_global_unlock( lock );
+      CloseHandle( hDBusDaemonMutex );
+      return FALSE;
+    }
 
   if (!_dbus_get_shm_name(&shm_name,scope))
     {
@@ -2845,10 +2862,39 @@ _dbus_get_autolaunch_address (const char *scope, DBusString *address,
 
   if (!SearchPathA(NULL, daemon_name, NULL, sizeof(dbus_exe_path), dbus_exe_path, &lpFile))
     {
-      printf ("please add the path to %s to your PATH environment variable\n", daemon_name);
-      printf ("or start the daemon manually\n\n");
-      goto out;
+      // Look in directory containing dbus shared library
+      HMODULE hmod;
+      char dbus_module_path[MAX_PATH];
+      DWORD rc;
+
+      _dbus_verbose( "did not found dbus daemon executable on default search path, "
+            "trying path where dbus shared library is located");
+
+      hmod = _dbus_win_get_dll_hmodule();
+      rc = GetModuleFileNameA(hmod, dbus_module_path, sizeof(dbus_module_path));
+      if (rc <= 0)
+        {
+          dbus_set_error_const (error, DBUS_ERROR_FAILED, "could not retrieve dbus shared library file name");
+          retval = FALSE;
+          goto out;
+        }
+      else
+        {
+          char *ext_idx = strrchr(dbus_module_path, '\\');
+          if (ext_idx)
+          *ext_idx = '\0';
+          if (!SearchPathA(dbus_module_path, daemon_name, NULL, sizeof(dbus_exe_path), dbus_exe_path, &lpFile))
+            {
+              dbus_set_error_const (error, DBUS_ERROR_FAILED, "could not find dbus-daemon executable");
+              retval = FALSE;
+              printf ("please add the path to %s to your PATH environment variable\n", daemon_name);
+              printf ("or start the daemon manually\n\n");
+              goto out;
+            }
+          _dbus_verbose( "found dbus daemon executable at %s",dbus_module_path);
+        }
     }
+
 
   // Create process
   ZeroMemory( &si, sizeof(si) );
@@ -3066,6 +3112,21 @@ _dbus_atomic_dec (DBusAtomic *atomic)
 }
 
 /**
+ * Atomically get the value of an integer. It may change at any time
+ * thereafter, so this is mostly only useful for assertions.
+ *
+ * @param atomic pointer to the integer to get
+ * @returns the value at this moment
+ */
+dbus_int32_t
+_dbus_atomic_get (DBusAtomic *atomic)
+{
+  /* this is what GLib does, hopefully it's right... */
+  MemoryBarrier ();
+  return atomic->value;
+}
+
+/**
  * Called when the bus daemon is signaled to reload its configuration; any
  * caches should be nuked. Of course any caches that need explicit reload
  * are probably broken, but c'est la vie.
@@ -3100,8 +3161,6 @@ dbus_bool_t
 _dbus_get_install_root(char *prefix, int len)
 {
     //To find the prefix, we cut the filename and also \bin\ if present
-    char* p = 0;
-    int i;
     DWORD pathLength;
     char *lastSlash;
     SetLastError( 0 );
@@ -3255,7 +3314,6 @@ _dbus_append_keyring_directory_for_credentials (DBusString      *directory,
 {
   DBusString homedir;
   DBusString dotdir;
-  dbus_uid_t uid;
   const char *homepath;
   const char *homedrive;
 

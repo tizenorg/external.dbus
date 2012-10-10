@@ -254,8 +254,8 @@ _dbus_write_pid_to_file_and_pipe (const DBusString *pidfile,
       DBusString pid;
       int bytes;
 
-      _dbus_verbose ("writing our pid to pipe %"PRIuPTR"\n",
-                     print_pid_pipe->fd_or_handle);
+      _dbus_verbose ("writing our pid to pipe %d\n",
+                     print_pid_pipe->fd);
       
       if (!_dbus_string_init (&pid))
         {
@@ -389,7 +389,6 @@ _dbus_request_file_descriptor_limit (unsigned int limit)
 #ifdef HAVE_SETRLIMIT
   struct rlimit lim;
   struct rlimit target_lim;
-  unsigned int current_limit;
 
   /* No point to doing this practically speaking
    * if we're not uid 0.  We expect the system
@@ -422,11 +421,16 @@ _dbus_request_file_descriptor_limit (unsigned int limit)
 #endif
 }
 
-void 
+void
 _dbus_init_system_log (void)
 {
+#ifdef HAVE_DECL_LOG_PERROR
+  openlog ("dbus", LOG_PID | LOG_PERROR, LOG_DAEMON);
+#else
   openlog ("dbus", LOG_PID, LOG_DAEMON);
+#endif
 }
+
 /**
  * Log a message to the system log file (e.g. syslog on Unix).
  *
@@ -476,6 +480,19 @@ _dbus_system_logv (DBusSystemLogSeverity severity, const char *msg, va_list args
         return;
     }
 
+#ifndef HAVE_DECL_LOG_PERROR
+    {
+      /* vsyslog() won't write to stderr, so we'd better do it */
+      va_list tmp;
+
+      DBUS_VA_COPY (tmp, args);
+      fprintf (stderr, "dbus[" DBUS_PID_FORMAT "]: ", _dbus_getpid ());
+      vfprintf (stderr, msg, tmp);
+      fputc ('\n', stderr);
+      va_end (tmp);
+    }
+#endif
+
   vsyslog (flags, msg, args);
 
   if (severity == DBUS_SYSTEM_LOG_FATAL)
@@ -523,7 +540,7 @@ _dbus_user_at_console (const char *username,
                        DBusError  *error)
 {
 
-  DBusString f;
+  DBusString u, f;
   dbus_bool_t result;
 
   result = FALSE;
@@ -539,8 +556,9 @@ _dbus_user_at_console (const char *username,
       goto out;
     }
 
+  _dbus_string_init_const (&u, username);
 
-  if (!_dbus_string_append (&f, username))
+  if (!_dbus_concat_dir_and_file (&f, &u))
     {
       _DBUS_SET_OOM (error);
       goto out;

@@ -1,0 +1,10 @@
+<manifest>
+        <define>
+                <domain name="dbus"/>
+        </define>
+        <request>
+                <domain name="dbus"/>
+        </request>
+
+</manifest>
+

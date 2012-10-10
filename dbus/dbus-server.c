@@ -53,6 +53,20 @@
  * @{
  */
 
+#ifndef _dbus_server_trace_ref
+void
+_dbus_server_trace_ref (DBusServer *server,
+    int old_refcount,
+    int new_refcount,
+    const char *why)
+{
+  static int enabled = -1;
+
+  _dbus_trace_ref ("DBusServer", server, old_refcount, new_refcount, why,
+      "DBUS_SERVER_TRACE", &enabled);
+}
+#endif
+
 /* this is a little fragile since it assumes the address doesn't
  * already have a guid, but it shouldn't
  */
@@ -99,7 +113,16 @@ _dbus_server_init_base (DBusServer             *server,
                         const DBusString       *address)
 {
   server->vtable = vtable;
-  server->refcount.value = 1;
+
+#ifdef DBUS_DISABLE_ASSERT
+  _dbus_atomic_inc (&server->refcount);
+#else
+    {
+      dbus_int32_t old_refcount = _dbus_atomic_inc (&server->refcount);
+
+      _dbus_assert (old_refcount == 0);
+    }
+#endif
 
   server->address = NULL;
   server->watches = NULL;
@@ -119,7 +142,7 @@ _dbus_server_init_base (DBusServer             *server,
   if (server->address == NULL)
     goto failed;
   
-  _dbus_mutex_new_at_location (&server->mutex);
+  _dbus_rmutex_new_at_location (&server->mutex);
   if (server->mutex == NULL)
     goto failed;
   
@@ -138,7 +161,7 @@ _dbus_server_init_base (DBusServer             *server,
   return TRUE;
 
  failed:
-  _dbus_mutex_free_at_location (&server->mutex);
+  _dbus_rmutex_free_at_location (&server->mutex);
   server->mutex = NULL;
   if (server->watches)
     {
@@ -185,7 +208,7 @@ _dbus_server_finalize_base (DBusServer *server)
   _dbus_watch_list_free (server->watches);
   _dbus_timeout_list_free (server->timeouts);
 
-  _dbus_mutex_free_at_location (&server->mutex);
+  _dbus_rmutex_free_at_location (&server->mutex);
   
   dbus_free (server->address);
 
@@ -433,18 +456,15 @@ _dbus_server_toggle_timeout (DBusServer  *server,
 void
 _dbus_server_ref_unlocked (DBusServer *server)
 {
+  dbus_int32_t old_refcount;
+
   _dbus_assert (server != NULL);
-  _dbus_assert (server->refcount.value > 0);
-  
   HAVE_LOCK_CHECK (server);
 
-#ifdef DBUS_HAVE_ATOMIC_INT
-  _dbus_atomic_inc (&server->refcount);
-#else
-  _dbus_assert (server->refcount.value > 0);
-
-  server->refcount.value += 1;
-#endif
+  old_refcount = _dbus_atomic_inc (&server->refcount);
+  _dbus_assert (old_refcount > 0);
+  _dbus_server_trace_ref (server, old_refcount, old_refcount + 1,
+      "ref_unlocked");
 }
 
 /**
@@ -455,25 +475,21 @@ _dbus_server_ref_unlocked (DBusServer *server)
 void
 _dbus_server_unref_unlocked (DBusServer *server)
 {
-  dbus_bool_t last_unref;
+  dbus_int32_t old_refcount;
 
   /* Keep this in sync with dbus_server_unref */
-  
+
   _dbus_assert (server != NULL);
-  _dbus_assert (server->refcount.value > 0);
 
   HAVE_LOCK_CHECK (server);
-  
-#ifdef DBUS_HAVE_ATOMIC_INT
-  last_unref = (_dbus_atomic_dec (&server->refcount) == 1);
-#else
-  _dbus_assert (server->refcount.value > 0);
 
-  server->refcount.value -= 1;
-  last_unref = (server->refcount.value == 0);
-#endif
-  
-  if (last_unref)
+  old_refcount = _dbus_atomic_dec (&server->refcount);
+  _dbus_assert (old_refcount > 0);
+
+  _dbus_server_trace_ref (server, old_refcount, old_refcount - 1,
+      "unref_unlocked");
+
+  if (old_refcount == 1)
     {
       _dbus_assert (server->disconnected);
       
@@ -679,18 +695,26 @@ dbus_server_listen (const char     *address,
 DBusServer *
 dbus_server_ref (DBusServer *server)
 {
+  dbus_int32_t old_refcount;
+
   _dbus_return_val_if_fail (server != NULL, NULL);
-  _dbus_return_val_if_fail (server->refcount.value > 0, NULL);
 
-#ifdef DBUS_HAVE_ATOMIC_INT
-  _dbus_atomic_inc (&server->refcount);
-#else
-  SERVER_LOCK (server);
-  _dbus_assert (server->refcount.value > 0);
+  /* can't get the refcount without a side-effect */
+  old_refcount = _dbus_atomic_inc (&server->refcount);
 
-  server->refcount.value += 1;
-  SERVER_UNLOCK (server);
+#ifndef DBUS_DISABLE_CHECKS
+  if (_DBUS_UNLIKELY (old_refcount <= 0))
+    {
+      /* undo side-effect first */
+      _dbus_atomic_dec (&server->refcount);
+      _dbus_warn_check_failed (_dbus_return_if_fail_warning_format,
+                               _DBUS_FUNCTION_NAME, "old_refcount > 0",
+                               __FILE__, __LINE__);
+      return NULL;
+    }
 #endif
+
+  _dbus_server_trace_ref (server, old_refcount, old_refcount + 1, "ref");
 
   return server;
 }
@@ -706,27 +730,30 @@ dbus_server_ref (DBusServer *server)
 void
 dbus_server_unref (DBusServer *server)
 {
-  dbus_bool_t last_unref;
+  dbus_int32_t old_refcount;
 
   /* keep this in sync with unref_unlocked */
-  
+
   _dbus_return_if_fail (server != NULL);
-  _dbus_return_if_fail (server->refcount.value > 0);
 
-#ifdef DBUS_HAVE_ATOMIC_INT
-  last_unref = (_dbus_atomic_dec (&server->refcount) == 1);
-#else
-  SERVER_LOCK (server);
-  
-  _dbus_assert (server->refcount.value > 0);
+  /* can't get the refcount without a side-effect */
+  old_refcount = _dbus_atomic_dec (&server->refcount);
 
-  server->refcount.value -= 1;
-  last_unref = (server->refcount.value == 0);
-  
-  SERVER_UNLOCK (server);
+#ifndef DBUS_DISABLE_CHECKS
+  if (_DBUS_UNLIKELY (old_refcount <= 0))
+    {
+      /* undo side-effect first */
+      _dbus_atomic_inc (&server->refcount);
+      _dbus_warn_check_failed (_dbus_return_if_fail_warning_format,
+                               _DBUS_FUNCTION_NAME, "old_refcount > 0",
+                               __FILE__, __LINE__);
+      return;
+    }
 #endif
-  
-  if (last_unref)
+
+  _dbus_server_trace_ref (server, old_refcount, old_refcount - 1, "unref");
+
+  if (old_refcount == 1)
     {
       /* lock not held! */
       _dbus_assert (server->disconnected);
@@ -749,11 +776,19 @@ void
 dbus_server_disconnect (DBusServer *server)
 {
   _dbus_return_if_fail (server != NULL);
-  _dbus_return_if_fail (server->refcount.value > 0);
+
+#ifdef DBUS_DISABLE_CHECKS
+  _dbus_atomic_inc (&server->refcount);
+#else
+    {
+      dbus_int32_t old_refcount = _dbus_atomic_inc (&server->refcount);
+
+      _dbus_return_if_fail (old_refcount > 0);
+    }
+#endif
 
   SERVER_LOCK (server);
-  _dbus_server_ref_unlocked (server);
-  
+
   _dbus_assert (server->vtable->disconnect != NULL);
 
   if (!server->disconnected)
@@ -1058,7 +1093,7 @@ dbus_bool_t
 dbus_server_allocate_data_slot (dbus_int32_t *slot_p)
 {
   return _dbus_data_slot_allocator_alloc (&slot_allocator,
-                                          (DBusMutex **)&_DBUS_LOCK_NAME (server_slots),
+                                          (DBusRMutex **)&_DBUS_LOCK_NAME (server_slots),
                                           slot_p);
 }
 

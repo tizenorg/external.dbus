@@ -1,15 +1,15 @@
-#sbs-git:slp/pkgs/d/dbus dbus 1.4.8 f63fbb6b0e1581671325ae81dc013cbd29d9b10e
-Name:       dbus
-Summary:    D-Bus message bus
-Version: 1.4.8
-Release:    4
-Group:      System/Libraries
-License:    GPLv2+ or AFL
-URL:        http://www.freedesktop.org/software/dbus/
-Source0:    http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
-Source1:    dbus-daemon_run
-Source2:    system.conf
-Requires:   %{name}-libs = %{version}
+Name:		dbus
+Summary:	D-Bus message bus
+Version:	1.6.4
+Release:	3
+Group:		System/Libraries
+License:	GPLv2+ or AFL
+URL:		http://www.freedesktop.org/software/dbus/
+Source0:	http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
+Source1:	dbus-daemon_run
+Source2:	system.conf
+Source1001:	dbus.manifest
+Requires:	%{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
 BuildRequires:  libx11-devel
@@ -24,7 +24,6 @@ messaging facility.
 %package libs
 Summary:    Libraries for accessing D-Bus
 Group:      System/Libraries
-Requires:   %{name} = %{version}-%{release}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
@@ -44,25 +43,32 @@ Headers and static libraries for D-Bus.
 %setup -q -n %{name}-%{version}
 
 %build
-
+cp %{SOURCE1001} .
 CFLAGS="$CFLAGS -DUSE_MONOTONIC"
 LDFLAGS="$LDFLAGS -lrt"
 
-%reconfigure  \
+%reconfigure --disable-static \
+    --exec-prefix=/ \
+    --bindir=%{_bindir} \
+    --libexecdir=%{_libdir}/dbus-1 \
+    --sysconfdir=%{_sysconfdir} \
+    --libdir=%{_libdir} \
+    --disable-asserts \
     --disable-xml-docs \
+    --disable-selinux \
+    --disable-libaudit \
     --enable-tests=no \
-    --with-session-socket-dir=/tmp \
-    --with-system-socket=/var/run/dbus/system_bus_socket \
+    --with-system-pid-file=%{_localstatedir}/run/messagebus.pid \
     --with-dbus-user=root \
-    --with-system-pid-file=/tmp/run/dbus/pid
+    --with-systemdsystemunitdir=%{_libdir}/systemd/system \
 
 make %{?jobs:-j%jobs}
 
 %install
 rm -rf %{buildroot}
 %make_install
-rm -rf $RPM_BUILD_ROOT/usr/share/man
 
+%remove_docs
 
 mkdir -p %{buildroot}/etc/rc.d/init.d
 mkdir -p %{buildroot}/etc/rc.d/rc{3,4}.d
@@ -73,6 +79,9 @@ chmod 755 %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run  %{buildroot}/etc/rc.d/rc3.d/S04dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S04dbus-daemon_run
 
+mkdir -p %{buildroot}%{_datadir}/dbus-1/interfaces
+
+ln -s dbus.service %{buildroot}%{_libdir}/systemd/system/messagebus.service
 
 %post
 mkdir -p /opt/var/lib/dbus
@@ -86,9 +95,9 @@ mkdir -p /opt/var/lib/dbus
 
 
 %files
-/etc/rc.d/init.d/*
-/etc/rc.d/rc?.d/*
-#/usr/etc/dbus-1/*
+%manifest dbus.manifest
+%{_sysconfdir}/rc.d/init.d/*
+%{_sysconfdir}/rc.d/rc?.d/*
 %{_bindir}/dbus-cleanup-sockets
 %{_bindir}/dbus-daemon
 %{_bindir}/dbus-monitor
@@ -100,17 +109,23 @@ mkdir -p /opt/var/lib/dbus
 %dir %{_sysconfdir}/dbus-1/session.d
 %config(noreplace) %{_sysconfdir}/dbus-1/system.conf
 %dir %{_sysconfdir}/dbus-1/system.d
-# dbus-daemon-launch-helper is not setuid in SLP
-%{_libexecdir}/dbus-daemon-launch-helper
-%{_libexecdir}/dbus-1
+%dir %{_libdir}/dbus-1
+%attr(4750,root,dbus) %{_libdir}/dbus-1/dbus-daemon-launch-helper
+%{_libdir}/systemd/system/dbus.service
+%{_libdir}/systemd/system/dbus.socket
+%{_libdir}/systemd/system/dbus.target.wants/dbus.socket
+%{_libdir}/systemd/system/messagebus.service
+%{_libdir}/systemd/system/multi-user.target.wants/dbus.service
+%{_libdir}/systemd/system/sockets.target.wants/dbus.socket
 %dir %{_datadir}/dbus-1
 %{_datadir}/dbus-1/services
 %{_datadir}/dbus-1/system-services
+%{_datadir}/dbus-1/interfaces
 %dir %{_localstatedir}/run/dbus
 %dir %{_localstatedir}/lib/dbus
 
 %files libs
-/%{_libdir}/libdbus-1.so.3*
+%{_libdir}/libdbus-1.so.3*
 
 %files devel
 %{_libdir}/libdbus-1.so
@@ -118,4 +133,3 @@ mkdir -p /opt/var/lib/dbus
 %dir %{_libdir}/dbus-1.0
 %{_libdir}/dbus-1.0/include/dbus/dbus-arch-deps.h
 %{_libdir}/pkgconfig/dbus-1.pc
-
