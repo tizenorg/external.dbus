@@ -1,7 +1,7 @@
 Name:		dbus
 Summary:	D-Bus message bus
 Version:	1.6.4
-Release:	3
+Release:	4
 Group:		System/Libraries
 License:	GPLv2+ or AFL
 URL:		http://www.freedesktop.org/software/dbus/
@@ -83,11 +83,21 @@ mkdir -p %{buildroot}%{_datadir}/dbus-1/interfaces
 
 ln -s dbus.service %{buildroot}%{_libdir}/systemd/system/messagebus.service
 
+mkdir -p $RPM_BUILD_ROOT%{_datadir}/license
+for keyword in LICENSE COPYING COPYRIGHT;
+do
+	for file in `find %{_builddir} -name $keyword`;
+	do
+		cat $file >> $RPM_BUILD_ROOT%{_datadir}/license/%{name};
+		echo "";
+	done;
+done
+
 %post
 mkdir -p /opt/var/lib/dbus
 
 
-%post libs 
+%post libs
 /sbin/ldconfig
 
 
@@ -96,6 +106,7 @@ mkdir -p /opt/var/lib/dbus
 
 %files
 %manifest dbus.manifest
+%{_datadir}/license/%{name}
 %{_sysconfdir}/rc.d/init.d/*
 %{_sysconfdir}/rc.d/rc?.d/*
 %{_bindir}/dbus-cleanup-sockets
