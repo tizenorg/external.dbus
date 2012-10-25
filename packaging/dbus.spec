@@ -9,10 +9,13 @@ Source0:	http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
 Source1:	dbus-daemon_run
 Source2:	system.conf
 Source1001:	dbus.manifest
+Patch1:         0001-Enable-checking-of-smack-context-from-DBus-interface.patch
+Patch2:         0002-Enforce-smack-policy-from-conf-file.patch
 Requires:	%{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
 BuildRequires:  libx11-devel
+BuildRequires:  pkgconfig(libsmack)
 
 
 %description
@@ -41,6 +44,8 @@ Headers and static libraries for D-Bus.
 
 %prep
 %setup -q -n %{name}-%{version}
+%patch1 -p1
+%patch2 -p1
 
 %build
 cp %{SOURCE1001} .
@@ -61,6 +66,7 @@ LDFLAGS="$LDFLAGS -lrt"
     --with-system-pid-file=%{_localstatedir}/run/messagebus.pid \
     --with-dbus-user=root \
     --with-systemdsystemunitdir=%{_libdir}/systemd/system \
+    --enable-smack \
 
 make %{?jobs:-j%jobs}
 
