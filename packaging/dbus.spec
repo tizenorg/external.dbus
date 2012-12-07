@@ -7,15 +7,22 @@ License:	GPLv2+ or AFL
 URL:		http://www.freedesktop.org/software/dbus/
 Source0:	http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
 Source1:	dbus-daemon_run
-Source2:	system.conf
+Source2:	dbus-user.socket
+Source3:	dbus-user.service
+Source4:	system.conf
 Source1001:	dbus.manifest
 Patch1:         0001-Enable-checking-of-smack-context-from-DBus-interface.patch
 Patch2:         0002-Enforce-smack-policy-from-conf-file.patch
+Patch3:         0003-dbus_service_highest_prio_setting.patch
+Patch4:         slp-relax-permissions.patch
+Patch5:         slp-add-services-directory.patch
 Requires:	%{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
 BuildRequires:  libx11-devel
 BuildRequires:  pkgconfig(libsmack)
+BuildRequires:  pkgconfig(libsystemd-daemon)
+BuildRequires:  pkgconfig(libsystemd-login)
 
 
 %description
@@ -27,6 +34,8 @@ messaging facility.
 %package libs
 Summary:    Libraries for accessing D-Bus
 Group:      System/Libraries
+#FIXME: This is circular dependency
+Requires:   %{name} = %{version}-%{release}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
@@ -46,11 +55,14 @@ Headers and static libraries for D-Bus.
 %setup -q -n %{name}-%{version}
 %patch1 -p1
 %patch2 -p1
+%patch3 -p1
+%patch4 -p1
+%patch5 -p1
 
 %build
 cp %{SOURCE1001} .
-CFLAGS="$CFLAGS -DUSE_MONOTONIC"
-LDFLAGS="$LDFLAGS -lrt"
+#CFLAGS="$CFLAGS -DUSE_MONOTONIC"
+#LDFLAGS="$LDFLAGS -lrt"
 
 %reconfigure --disable-static \
     --exec-prefix=/ \
@@ -71,23 +83,29 @@ LDFLAGS="$LDFLAGS -lrt"
 make %{?jobs:-j%jobs}
 
 %install
-rm -rf %{buildroot}
 %make_install
-
 %remove_docs
 
-mkdir -p %{buildroot}/etc/rc.d/init.d
-mkdir -p %{buildroot}/etc/rc.d/rc{3,4}.d
-mkdir -p %{buildroot}/usr/etc/dbus-1
-cp %{SOURCE1} %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
-cp %{SOURCE2} %{buildroot}/etc/dbus-1/system.conf
-chmod 755 %{buildroot}/etc/rc.d/init.d/dbus-daemon_run
-ln -s ../init.d/dbus-daemon_run  %{buildroot}/etc/rc.d/rc3.d/S04dbus-daemon_run
-ln -s ../init.d/dbus-daemon_run %{buildroot}/etc/rc.d/rc4.d/S04dbus-daemon_run
+mv %{buildroot}/etc/dbus-1/system.conf %{buildroot}/etc/dbus-1/system.conf.systemd
+install -m644 %{SOURCE4} %{buildroot}/etc/dbus-1/system.conf
+
+mkdir -p %{buildroot}%{_libdir}/pkgconfig
+# Change the arch-deps.h include directory to /usr/lib instead of /lib
+sed -e 's@-I${libdir}@-I${prefix}/%{_lib}@' %{buildroot}%{_libdir}/pkgconfig/dbus-1.pc
 
 mkdir -p %{buildroot}%{_datadir}/dbus-1/interfaces
 
 ln -s dbus.service %{buildroot}%{_libdir}/systemd/system/messagebus.service
+
+mkdir -p %{buildroot}%{_libdir}/systemd/user
+install -m0644 %{SOURCE2} %{buildroot}%{_libdir}/systemd/user/dbus.socket
+install -m0644 %{SOURCE3} %{buildroot}%{_libdir}/systemd/user/dbus.service
+
+mkdir -p %{buildroot}%{_sysconfdir}/rc.d/init.d
+mkdir -p %{buildroot}%{_sysconfdir}/rc.d/rc{3,4}.d
+install -m0755 %{SOURCE1} %{buildroot}%{_sysconfdir}/rc.d/init.d/dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc3.d/S30dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc4.d/S30dbus-daemon_run
 
 mkdir -p $RPM_BUILD_ROOT%{_datadir}/license
 for keyword in LICENSE COPYING COPYRIGHT;
@@ -102,13 +120,9 @@ done
 %post
 mkdir -p /opt/var/lib/dbus
 
-
-%post libs
-/sbin/ldconfig
-
+%post libs -p /sbin/ldconfig
 
 %postun libs -p /sbin/ldconfig
-
 
 %files
 %manifest dbus.manifest
@@ -125,26 +139,25 @@ mkdir -p /opt/var/lib/dbus
 %config(noreplace) %{_sysconfdir}/dbus-1/session.conf
 %dir %{_sysconfdir}/dbus-1/session.d
 %config(noreplace) %{_sysconfdir}/dbus-1/system.conf
+%config(noreplace) %{_sysconfdir}/dbus-1/system.conf.systemd
 %dir %{_sysconfdir}/dbus-1/system.d
 %dir %{_libdir}/dbus-1
 %attr(4750,root,dbus) %{_libdir}/dbus-1/dbus-daemon-launch-helper
-%{_libdir}/systemd/system/dbus.service
-%{_libdir}/systemd/system/dbus.socket
-%{_libdir}/systemd/system/dbus.target.wants/dbus.socket
-%{_libdir}/systemd/system/messagebus.service
-%{_libdir}/systemd/system/multi-user.target.wants/dbus.service
-%{_libdir}/systemd/system/sockets.target.wants/dbus.socket
+%{_libdir}/systemd/system/*
+%{_libdir}/systemd/user/*
 %dir %{_datadir}/dbus-1
+%{_datadir}/dbus-1/interfaces
 %{_datadir}/dbus-1/services
 %{_datadir}/dbus-1/system-services
-%{_datadir}/dbus-1/interfaces
 %dir %{_localstatedir}/run/dbus
 %dir %{_localstatedir}/lib/dbus
 
 %files libs
+%manifest dbus.manifest
 %{_libdir}/libdbus-1.so.3*
 
 %files devel
+%manifest dbus.manifest
 %{_libdir}/libdbus-1.so
 %{_includedir}/dbus-1.0/dbus/dbus*.h
 %dir %{_libdir}/dbus-1.0

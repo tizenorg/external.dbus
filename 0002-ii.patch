@@ -1,0 +1,42 @@
+From 5eb7aeca5c3d5370d591854873affaf0736213f2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C5=81ukasz=20Stelmach?= <l.stelmach@samsung.com>
+Date: Mon, 22 Oct 2012 11:38:37 +0200
+Subject: [PATCH 2/2] ii#
+
+---
+ packaging/dbus.spec |    5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/packaging/dbus.spec b/packaging/dbus.spec
+index 9978033..c9622ea 100755
+--- a/packaging/dbus.spec
++++ b/packaging/dbus.spec
+@@ -9,6 +9,7 @@ Source0:	http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
+ Source1:	dbus-daemon_run
+ Source2:	dbus-user.socket
+ Source3:	dbus-user.service
++Source4:	system.conf
+ Source1001:	dbus.manifest
+ Patch1:         0001-Enable-checking-of-smack-context-from-DBus-interface.patch
+ Patch2:         0002-Enforce-smack-policy-from-conf-file.patch
+@@ -85,6 +86,9 @@ make %{?jobs:-j%jobs}
+ %make_install
+ %remove_docs
+ 
++mv %{buildroot}/etc/dbus-1/system.conf %{buildroot}/etc/dbus-1/system.conf.systemd
++install -m644 %{SOURCE4} %{buildroot}/etc/dbus-1/system.conf
++
+ mkdir -p %{buildroot}%{_libdir}/pkgconfig
+ # Change the arch-deps.h include directory to /usr/lib instead of /lib
+ sed -e 's@-I${libdir}@-I${prefix}/%{_lib}@' %{buildroot}%{_libdir}/pkgconfig/dbus-1.pc
+@@ -138,6 +142,7 @@ mkdir -p /opt/var/lib/dbus
+ %config(noreplace) %{_sysconfdir}/dbus-1/session.conf
+ %dir %{_sysconfdir}/dbus-1/session.d
+ %config(noreplace) %{_sysconfdir}/dbus-1/system.conf
++%config(noreplace) %{_sysconfdir}/dbus-1/system.conf.systemd
+ %dir %{_sysconfdir}/dbus-1/system.d
+ %dir %{_libdir}/dbus-1
+ %attr(4750,root,dbus) %{_libdir}/dbus-1/dbus-daemon-launch-helper
+-- 
+1.7.10.4
+
