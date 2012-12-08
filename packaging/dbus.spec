@@ -108,8 +108,8 @@ install -m0644 %{SOURCE3} %{buildroot}%{_libdir}/systemd/user/dbus.service
 mkdir -p %{buildroot}%{_sysconfdir}/rc.d/init.d
 mkdir -p %{buildroot}%{_sysconfdir}/rc.d/rc{3,4}.d
 install -m0755 %{SOURCE1} %{buildroot}%{_sysconfdir}/rc.d/init.d/dbus-daemon_run
-ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc3.d/S30dbus-daemon_run
-ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc4.d/S30dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc3.d/S02dbus-daemon_run
+ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc4.d/S02dbus-daemon_run
 
 mkdir -p $RPM_BUILD_ROOT%{_datadir}/license
 for keyword in LICENSE COPYING COPYRIGHT;
