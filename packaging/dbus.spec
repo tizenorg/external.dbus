@@ -157,11 +157,9 @@ mkdir -p /opt/var/lib/dbus
 %dir %{_localstatedir}/lib/dbus
 
 %files libs
-%manifest dbus.manifest
 %{_libdir}/libdbus-1.so.3*
 
 %files devel
-%manifest dbus.manifest
 %{_libdir}/libdbus-1.so
 %{_includedir}/dbus-1.0/dbus/dbus*.h
 %dir %{_libdir}/dbus-1.0
