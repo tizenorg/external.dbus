@@ -23,8 +23,8 @@ BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
 BuildRequires:  libx11-devel
 BuildRequires:  pkgconfig(libsmack)
-BuildRequires:  pkgconfig(libsystemd-daemon)
-BuildRequires:  pkgconfig(libsystemd-login)
+#BuildRequires:  pkgconfig(libsystemd-daemon)
+#BuildRequires:  pkgconfig(libsystemd-login)
 
 
 %description
