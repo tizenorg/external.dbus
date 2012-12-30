@@ -21,7 +21,7 @@ Patch7:         0007-Set-correct-address-when-using-address-systemd.patch
 Requires:	%{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
-BuildRequires:  libx11-devel
+BuildRequires:  pkgconfig(x11)
 BuildRequires:  pkgconfig(libsmack)
 #BuildRequires:  pkgconfig(libsystemd-daemon)
 #BuildRequires:  pkgconfig(libsystemd-login)
@@ -38,8 +38,6 @@ Summary:    Libraries for accessing D-Bus
 Group:      System/Libraries
 #FIXME: This is circular dependency
 Requires:   %{name} = %{version}-%{release}
-Requires(post): /sbin/ldconfig
-Requires(postun): /sbin/ldconfig
 
 %description libs
 Lowlevel libraries for accessing D-Bus.
