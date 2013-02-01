@@ -5,6 +5,9 @@
         <request>
                 <domain name="dbus"/>
         </request>
-
+        <assign>
+                <filesystem path="/etc/rc.d/init.d/*" label="_" exec_label="none" />
+                <filesystem path="/etc/rc.d/rc3.d/*" label="_" exec_label="none" />
+                <filesystem path="/etc/rc.d/rc4.d/*" label="_" exec_label="none" />
+        </assign>
 </manifest>
-
