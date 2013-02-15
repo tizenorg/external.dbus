@@ -1,0 +1,15 @@
+--- dbus/bus/system.conf.in.orig	2012-08-30 22:34:59.217764232 +0900
++++ dbus/bus/system.conf.in	2012-08-30 22:41:16.033764186 +0900
+@@ -45,10 +45,8 @@
+     <!-- All users can connect to system bus -->
+     <allow user="*"/>
+ 
+-    <!-- Holes must be punched in service configuration files for
+-         name ownership and sending method calls -->
+-    <deny own="*"/>
+-    <deny send_type="method_call"/>
++    <allow own="*"/>
++    <allow send_type="method_call"/>
+ 
+     <!-- Signals and reply messages (method returns, errors) are allowed
+          by default -->
