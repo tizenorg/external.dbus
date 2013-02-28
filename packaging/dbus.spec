@@ -1,7 +1,7 @@
 Name:		dbus
 Summary:	D-Bus message bus
 Version:	1.6.4
-Release:	4
+Release:	5
 Group:		System/Libraries
 License:	GPLv2+ or AFL
 URL:		http://www.freedesktop.org/software/dbus/
