@@ -9,5 +9,15 @@
                 <filesystem path="/etc/rc.d/init.d/*" label="_" exec_label="none" />
                 <filesystem path="/etc/rc.d/rc3.d/*" label="_" exec_label="none" />
                 <filesystem path="/etc/rc.d/rc4.d/*" label="_" exec_label="none" />
+		<filesystem path="/usr/lib/systemd/system/dbus.service" label="_" exec_label="none" />
+		<filesystem path="/usr/lib/systemd/system/dbus.socket" label="_" exec_label="none" />
+		<filesystem path="/usr/lib/systemd/system/messagebus.service" label="_" />
+		<filesystem path="/usr/lib/systemd/system/dbus.target.wants" label="_" />
+		<filesystem path="/usr/lib/systemd/system/dbus.target.wants/dbus.socket" label="_" exec_label="none" />
+		<filesystem path="/usr/lib/systemd/system/multi-user.target.wants/dbus.service" label="_" exec_label="none"/>
+		<filesystem path="/usr/lib/systemd/system/sockets.target.wants" label="_" />
+		<filesystem path="/usr/lib/systemd/system/sockets.target.wants/dbus.socket" label="_" exec_label="none" />
+		<filesystem path="/usr/lib/systemd/user/dbus.service" label="_" exec_label="none" />
+		<filesystem path="/usr/lib/systemd/user/dbus.socket" label="_" exec_label="none" />
         </assign>
 </manifest>
