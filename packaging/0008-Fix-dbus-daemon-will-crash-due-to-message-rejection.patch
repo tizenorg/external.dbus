@@ -1,0 +1,116 @@
+From bb33c29784e4e05c7ddaf5f913b629183ba07f0a Mon Sep 17 00:00:00 2001
+From: Chengwei Yang <chengwei.yang@intel.com>
+Date: Sat, 25 May 2013 16:41:42 +0800
+Subject: [PATCH] [Fix] dbus-daemon will crash due to message rejection
+
+The issue goes in the below situation.
+
+At system early boot up, systemd registers it's dbus service
+"org.freedesktop.systemd1" in asynchronous manner since dbus-daemon
+hasn't been activated. After dbus-daemon activated, the others may
+access services registered to dbus and then dbus will try to activate
+the acquired service if there is no owner of it, in addition, if the
+owner of service is declaimed as a systemd bus activation service, dbus
+will try to activate (in fact, just pending the request) systemd
+(org.freedesktop.systemd1) if it's not around here. Otherwise, dbus just
+create a new message (signal) and dispatch it to systemd.
+
+The issues caused by the inconsistent way how dbus dispatch the
+activation message to systemd1, if systemd is there, the message created
+by dbus with connection is NULL, so no security checking in fact because
+both systemd and dbus-daemon are running in 'root'. However, if the
+orignal request sent by unprivileged process, the message created by
+dbus will failed to pass security check due to the original connection
+created by unprivileged process.
+
+This some how isn't consistent in the two situations:
+1. systemd is already here, the message created by dbus pass security check
+2. systemd isn't here, the message created by dbus rejected
+
+The worse situation is it will cause dbus-daemon coredumped later (time
+out) because fail to pass assertion (reply_serial != 0), see below backtrace.
+
+  #0  0xb77f4424 in __kernel_vsyscall ()
+  #1  0xb7658cc1 in raise (sig=6) at ../nptl/sysdeps/unix/sysv/linux/raise.c:64
+  #2  0xb765c0ee in abort () at abort.c:92
+  #3  0x08085315 in _dbus_abort () at dbus-sysdeps.c:94
+  #4  0x0807a256 in _dbus_warn_check_failed (format=0x809cb68 "arguments to %s() were incorrect, assertion \"%s\" failed in file %s line %d.\nThis is normally a bug in some application using the D-Bus library.\n") at dbus-internals.c:290
+  #5  0x0806b94e in dbus_message_set_reply_serial (message=0x9149820, reply_serial=0) at dbus-message.c:1069
+  #6  0x0806eece in dbus_message_new_error (reply_to=0x90f2f30, error_name=0x914f780 "org.freedesktop.DBus.Error.TimedOut", error_message=0x9150250 "Activation of org.freedesktop.systemd1 timed out") at dbus-message.c:1425
+  #7  0x080557e6 in bus_transaction_send_error_reply (transaction=0x914aa18, connection=0x90f1ba0, error=0xbfb53110, in_reply_to=0x90f2f30) at connection.c:2271
+  #8  0x0804b5eb in try_send_activation_failure (pending_activation=0x90f0ae0, how=0xbfb53110) at activation.c:1238
+  #9  pending_activation_failed (pending_activation=0x90f0ae0, how=0xbfb53110) at activation.c:1267
+  #10 0x0804b8c3 in pending_activation_timed_out (data=0x90f0ae0) at activation.c:1463
+  #11 0x080753e3 in dbus_timeout_handle (timeout=0x90f0c20) at dbus-timeout.c:474
+  #12 0x08086761 in _dbus_loop_iterate (loop=0x90c1158, block=1) at dbus-mainloop.c:764
+  #13 0x08086bd0 in _dbus_loop_run (loop=0x90c1158) at dbus-mainloop.c:906
+  #14 0x0805fb66 in main (argc=6, argv=0xbfb535a4) at main.c:634
+
+The below is a cut of boot log from systemd journal, in the below
+situation, pulseaudio (running as 'pulse (uid=6507)') try to access
+well known bus org.bluez twice which is a systemd bus activation service
+and in that moment systemd isn't ready.
+
+Jan 30 13:05:24 localhost.localdomain dbus-daemon[315]: dbus[315]: [system] Activating systemd to hand-off: service name='org.bluez' unit='dbus-org.bluez.service'
+Jan 30 13:05:24 localhost.localdomain dbus-daemon[315]: dbus[315]: [system] Successfully activated service 'org.freedesktop.systemd1'
+Jan 30 13:05:24 localhost.localdomain dbus-daemon[315]: dbus[315]: [system] Rejected send message, 2 matched rules; type="signal", sender=":1.14" (uid=6507 pid=433 comm="/usr/bin/pulseaudio --system --log-level=4 ") interface="org.freedesktop.systemd1.Activator" member="ActivationRequest" error name="(unset)" requested_reply="0" destination="org.freedesktop.systemd1" (uid=0 pid=1 comm="/usr/lib/systemd/systemd ")
+Jan 30 13:05:23 localhost.localdomain dbus[315]: [system] Activating systemd to hand-off: service name='org.bluez' unit='dbus-org.bluez.service'
+Jan 30 13:05:23 localhost.localdomain dbus[315]: [system] Successfully activated service 'org.freedesktop.systemd1'
+Jan 30 13:05:23 localhost.localdomain dbus[315]: [system] Rejected send message, 2 matched rules; type="signal", sender=":1.14" (uid=6507 pid=433 comm="/usr/bin/pulseaudio --system --log -level=4 ") interface="org.freedesktop.systemd1.Activator" member="ActivationRequest" error name="(unset)" requested_reply="0" destination="org.freedesktop.systemd1" (uid=0 pid=1 comm="/usr/lib/systemd/systemd ")
+Jan 30 13:05:47 localhost.localdomain dbus-daemon[315]: dbus[315]: [system] Failed to activate service 'org.freedesktop.systemd1': timed out
+Jan 30 13:05:47 localhost.localdomain dbus-daemon[315]: process 315: arguments to dbus_message_set_reply_serial() were incorrect, assertion "reply_serial != 0" failed in file dbus-messag
+e.c line 1070.
+Jan 30 13:05:47 localhost.localdomain dbus-daemon[315]: This is normally a bug in some application using the D-Bus library.
+Jan 30 13:05:47 localhost.localdomain dbus-daemon[315]: D-Bus not built with -rdynamic so unable to print a backtrace
+Jan 30 13:05:47 localhost.localdomain dbus[315]: [system] Failed to activate service 'org.freedesktop.systemd1': timed out
+
+Signed-off-by: Chengwei Yang <chengwei.yang@intel.com>
+---
+ bus/activation.c |   10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/bus/activation.c b/bus/activation.c
+index 3dfba78..e95c410 100644
+--- a/bus/activation.c
++++ b/bus/activation.c
+@@ -1106,7 +1106,8 @@ bus_activation_service_created (BusActivation  *activation,
+       BusPendingActivationEntry *entry = link->data;
+       DBusList *next = _dbus_list_get_next_link (&pending_activation->entries, link);
+ 
+-      if (dbus_connection_get_is_connected (entry->connection))
++      /* entry->connection is NULL for activating systemd */
++      if (entry->connection && dbus_connection_get_is_connected (entry->connection))
+         {
+           /* Only send activation replies to regular activation requests. */
+           if (!entry->auto_activation)
+@@ -1175,7 +1176,7 @@ bus_activation_send_pending_auto_activation_messages (BusActivation  *activation
+       BusPendingActivationEntry *entry = link->data;
+       DBusList *next = _dbus_list_get_next_link (&pending_activation->entries, link);
+ 
+-      if (entry->auto_activation && dbus_connection_get_is_connected (entry->connection))
++      if (entry->auto_activation && (entry->connection == NULL || dbus_connection_get_is_connected (entry->connection)))
+         {
+           DBusConnection *addressed_recipient;
+ 
+@@ -1759,7 +1760,8 @@ bus_activation_activate_service (BusActivation  *activation,
+   pending_activation_entry->activation_message = activation_message;
+   dbus_message_ref (activation_message);
+   pending_activation_entry->connection = connection;
+-  dbus_connection_ref (connection);
++  if (connection)
++    dbus_connection_ref (connection);
+ 
+   /* Check if the service is being activated */
+   pending_activation = _dbus_hash_table_lookup_string (activation->pending_activations, service_name);
+@@ -1972,7 +1974,7 @@ bus_activation_activate_service (BusActivation  *activation,
+                                service_name,
+                                entry->systemd_service);
+               /* systemd is not around, let's "activate" it. */
+-              retval = bus_activation_activate_service (activation, connection, activation_transaction, TRUE,
++              retval = bus_activation_activate_service (activation, NULL, activation_transaction, TRUE,
+                                                         message, "org.freedesktop.systemd1", error);
+             }
+ 
+-- 
+1.7.9.5
+

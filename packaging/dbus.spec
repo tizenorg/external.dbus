@@ -18,6 +18,7 @@ Patch4:         slp-relax-permissions.patch
 Patch5:         slp-add-services-directory.patch
 Patch6:         0006-build-Make-disable-xml-docs-build-work-again.patch
 Patch7:         0007-Set-correct-address-when-using-address-systemd.patch
+Patch8:         0008-Fix-dbus-daemon-will-crash-due-to-message-rejection.patch
 Requires:	%{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
@@ -60,6 +61,7 @@ Headers and static libraries for D-Bus.
 %patch5 -p1
 %patch6 -p1
 %patch7 -p1
+%patch8 -p1
 
 %build
 cp %{SOURCE1001} .
