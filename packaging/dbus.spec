@@ -11,6 +11,7 @@ Source2:	dbus-user.socket
 Source3:	dbus-user.service
 Source4:	system.conf
 Source1001:	dbus.manifest
+Source1002:     dbus.rule
 Patch1:         0001-Enable-checking-of-smack-context-from-DBus-interface.patch
 Patch2:         0002-Enforce-smack-policy-from-conf-file.patch
 Patch3:         0003-dbus_service_highest_prio_setting.patch
@@ -111,6 +112,9 @@ install -m0755 %{SOURCE1} %{buildroot}%{_sysconfdir}/rc.d/init.d/dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc3.d/S02dbus-daemon_run
 ln -s ../init.d/dbus-daemon_run %{buildroot}%{_sysconfdir}/rc.d/rc4.d/S02dbus-daemon_run
 
+mkdir -p %{buildroot}/opt/etc/smack/accesses.d
+install -m0644 %{SOURCE1002} %{buildroot}/opt/etc/smack/accesses.d/dbus.rule
+
 mkdir -p $RPM_BUILD_ROOT%{_datadir}/license
 for keyword in LICENSE COPYING COPYRIGHT;
 do
@@ -155,6 +159,7 @@ mkdir -p /opt/var/lib/dbus
 %{_datadir}/dbus-1/system-services
 %dir %{_localstatedir}/run/dbus
 %dir %{_localstatedir}/lib/dbus
+/opt/etc/smack/accesses.d/dbus.rule
 
 %files libs
 %{_libdir}/libdbus-1.so.3*
