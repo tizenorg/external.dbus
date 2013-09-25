@@ -125,6 +125,10 @@ do
 	done;
 done
 
+# license
+mkdir -p %{buildroot}/usr/share/license
+cp COPYING %{buildroot}/usr/share/license/%{name}
+
 %post
 mkdir -p /opt/var/lib/dbus
 
@@ -160,6 +164,7 @@ mkdir -p /opt/var/lib/dbus
 %dir %{_localstatedir}/run/dbus
 %dir %{_localstatedir}/lib/dbus
 /opt/etc/smack/accesses.d/dbus.rule
+/usr/share/license/%{name}
 
 %files libs
 %{_libdir}/libdbus-1.so.3*
