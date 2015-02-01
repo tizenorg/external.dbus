@@ -8,20 +8,17 @@ URL:		http://www.freedesktop.org/software/dbus/
 Source0:	http://dbus.freedesktop.org/releases/%{name}/%{name}-%{version}.tar.gz
 Source1:	dbus-daemon_run
 Source2:	dbus-user.socket
-%if "%{_repository}" == "wearable"
 Source3:	dbus-user.service
-%else
-Source3:        dbus-user-mobile.service
-%endif
 Source4:	system.conf
 Source1001:	dbus.manifest
 Requires:	%{name}-libs = %{version}
 BuildRequires:  expat-devel >= 1.95.5
 BuildRequires:  libtool
-#BuildRequires:  pkgconfig(x11)
+BuildRequires:  pkgconfig(x11)
 BuildRequires:  pkgconfig(libsmack)
 #BuildRequires:  pkgconfig(libsystemd-daemon)
 #BuildRequires:  pkgconfig(libsystemd-login)
+
 
 %description
 D-Bus is a system for sending messages between applications. It is used both
