@@ -28,16 +28,16 @@ DTDS = \
 	busconfig.dtd \
 	introspect.dtd
 
+dist_doc_DATA = system-activation.txt
+
+# uploaded and distributed, but not installed
 STATIC_DOCS = \
-	diagram.png \
-	diagram.svg \
 	dbus-faq.xml \
 	dbus-specification.xml \
 	dbus-test-plan.xml \
 	dbus-tutorial.xml \
 	dcop-howto.txt \
 	introspect.xsl \
-	system-activation.txt \
 	$(DTDS)
 
 EXTRA_DIST = \
@@ -46,16 +46,29 @@ EXTRA_DIST = \
 	$(STATIC_DOCS) \
 	$(MAN_IN_FILES)
 
-HTML_FILES=					\
+html_DATA =
+
+dist_html_DATA =
+
+# diagram.png/diagram.svg aren't really HTML, but must go in the same
+# directory as the HTML to avoid broken links
+STATIC_HTML = \
+	diagram.png \
+	diagram.svg \
+	$(NULL)
+
+dist_html_DATA += $(STATIC_HTML)
+
+XMLTO_OUTPUT=					\
 	dbus-faq.html				\
 	dbus-specification.html			\
 	dbus-test-plan.html			\
 	dbus-tutorial.html
 
 if DBUS_XML_DOCS_ENABLED
-all-local:: $(HTML_FILES)
 
-EXTRA_DIST += $(HTML_FILES)
+# we distribute these in the tarball so users don't necessarily need xmlto
+dist_html_DATA += $(XMLTO_OUTPUT)
 
 dbus-specification.html: dbus-specification.xml
 	$(XMLTO) html-nochunks $<
@@ -68,7 +81,6 @@ dbus-tutorial.html: dbus-tutorial.xml
 
 dbus-faq.html: dbus-faq.xml
 	$(XMLTO) html-nochunks $<
-
 endif
 
 if DBUS_DOXYGEN_DOCS_ENABLED
@@ -79,7 +91,7 @@ doxygen.stamp: $(wildcard $(top_srcdir)/dbus/*.[ch])
 	@touch $@
 
 if DBUS_HAVE_XSLTPROC
-api_DATA = dbus.devhelp
+html_DATA += dbus.devhelp
 
 dbus.devhelp: $(srcdir)/doxygen_to_devhelp.xsl doxygen.stamp
 	$(XSLTPROC) -o $@ $< api/xml/index.xml
@@ -95,15 +107,20 @@ uninstall-local::
 	rm -f $(DESTDIR)$(apidir)/*.html
 	rm -f $(DESTDIR)$(apidir)/*.png
 	rm -f $(DESTDIR)$(apidir)/*.css
+	rm -f $(DESTDIR)$(apidir)/*.js
+	rm -f $(DESTDIR)$(htmldir)/*.html
+	rm -f $(DESTDIR)$(docdir)/*.txt
+	rm -f $(DESTDIR)$(htmldir)/*.png
+	rm -f $(DESTDIR)$(htmldir)/*.svg
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(apidir) || \
 		rmdir $(DESTDIR)$(apidir)
 endif
 
 if DBUS_HAVE_MAN2HTML
-all-local:: $(MAN_HTML_FILES)
+html_DATA += $(MAN_HTML_FILES)
 
 %.1.html: %.1
-	$(AM_V_GEN)( $(MAN2HTML) $< > $@.tmp && mv $@.tmp $@ )
+	$(AM_V_GEN)( $(MAN2HTML) < $< > $@.tmp && mv $@.tmp $@ )
 endif
 
 if DBUS_CAN_UPLOAD_DOCS
@@ -115,14 +132,17 @@ BONUS_FILES = \
 	$(top_srcdir)/COPYING \
 	$(top_srcdir)/ChangeLog
 
-dbus-docs: $(STATIC_DOCS) $(HTML_FILES) $(MAN_HTML_FILES) $(BONUS_FILES) doxygen.stamp
-	$(AM_V_at)rm -rf $@
-	$(AM_V_GEN)$(MKDIR_P) $@/api
-	$(AM_V_at)cp $(STATIC_DOCS) $@
-	$(AM_V_at)cp $(HTML_FILES) $@
-	$(AM_V_at)cp $(MAN_HTML_FILES) $@
-	$(AM_V_at)cp $(BONUS_FILES) $@
-	$(AM_V_at)cp -r api/html $@/api
+dbus-docs: $(STATIC_DOCS) $(dist_doc_DATA) $(dist_html_DATA) $(MAN_HTML_FILES) $(BONUS_FILES) doxygen.stamp
+	$(AM_V_at)rm -rf $@ $@.tmp
+	$(AM_V_GEN)$(MKDIR_P) $@.tmp/api
+	$(AM_V_at)cd $(srcdir) && cp $(STATIC_DOCS) @abs_builddir@/$@.tmp
+	$(AM_V_at)cd $(srcdir) && cp $(dist_doc_DATA) @abs_builddir@/$@.tmp
+	$(AM_V_at)cd $(srcdir) && cp $(STATIC_HTML) @abs_builddir@/$@.tmp
+	$(AM_V_at)cp $(XMLTO_OUTPUT) @abs_builddir@/$@.tmp
+	$(AM_V_at)cp $(MAN_HTML_FILES) @abs_builddir@/$@.tmp
+	$(AM_V_at)cp $(BONUS_FILES) @abs_builddir@/$@.tmp
+	$(AM_V_at)cp -r api/html @abs_builddir@/$@.tmp/api
+	$(AM_V_at)mv $@.tmp $@
 
 dbus-docs.tar.gz: dbus-docs
 	$(AM_V_GEN)tar czf $@ $<
@@ -134,10 +154,10 @@ SPECIFICATION_SERVER = specifications.freedesktop.org
 SPECIFICATION_PATH = /srv/specifications.freedesktop.org/www/dbus/1.0
 
 maintainer-upload-docs: dbus-docs.tar.gz dbus-docs
-	scp dbus-docs.tar.gz $(DOC_SERVER):$(DOC_WWW_DIR)
-	rsync -rvzP --chmod=Dg+s,ug+rwX,o=rX \
+	scp dbus-docs.tar.gz $(DOC_SERVER):$(DOC_WWW_DIR)/
+	rsync -rpvzP --chmod=Dg+s,ug+rwX,o=rX \
 		dbus-docs/ $(DOC_SERVER):$(DOC_WWW_DIR)/doc/
-	scp -p $(DTDS) $(SPECIFICATION_SERVER):$(SPECIFICATION_PATH)
+	cd $(srcdir) && scp -p $(DTDS) $(SPECIFICATION_SERVER):$(SPECIFICATION_PATH)/
 else
 maintainer-upload-docs:
 	@echo "Can't upload documentation! Re-run configure with"
@@ -147,10 +167,11 @@ maintainer-upload-docs:
 endif
 
 clean-local:
+	rm -f $(html_DATA)
 	rm -rf api
-	rm -rf dbus-docs
+	rm -rf dbus-docs dbus-docs.tmp
 	rm -f *.1.html
 	rm -f doxygen.stamp
 
 maintainer-clean-local:
-	rm -f $(HTML_FILES)
+	rm -f $(XMLTO_OUTPUT)

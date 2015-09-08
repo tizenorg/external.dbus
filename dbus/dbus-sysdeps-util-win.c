@@ -191,7 +191,7 @@ _dbus_write_pid_to_file_and_pipe (const DBusString *pidfile,
       DBusString pid;
       int bytes;
 
-      _dbus_verbose ("writing our pid to pipe %d\n", print_pid_pipe->fd_or_handle);
+      _dbus_verbose ("writing our pid to pipe %d\n", print_pid_pipe->fd);
 
       if (!_dbus_string_init (&pid))
         {
@@ -264,7 +264,7 @@ _dbus_request_file_descriptor_limit (unsigned int limit)
 void
 _dbus_init_system_log (void)
 {
-    // FIXME!
+  /* OutputDebugStringA doesn't need any special initialization, do nothing */
 }
 
 /**

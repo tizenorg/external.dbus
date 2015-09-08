@@ -26,6 +26,7 @@
 #include "services.h"
 #include "test.h"
 #include "utils.h"
+#include "smack.h"
 #include <dbus/dbus-list.h>
 #include <dbus/dbus-hash.h>
 #include <dbus/dbus-internals.h>
@@ -132,6 +133,7 @@ struct BusPolicy
   DBusHashTable *rules_by_gid;     /**< per-GID policy rules */
   DBusList *at_console_true_rules; /**< console user policy rules where at_console="true"*/
   DBusList *at_console_false_rules; /**< console user policy rules where at_console="false"*/
+  DBusHashTable *rules_by_smack_label; /**< per-Smack label policy rules or NULL if disabled*/
 };
 
 static void
@@ -181,6 +183,17 @@ bus_policy_new (void)
   if (policy->rules_by_gid == NULL)
     goto failed;
 
+#ifdef DBUS_ENABLE_SMACK
+  if (have_smack())
+    {
+      policy->rules_by_smack_label = _dbus_hash_table_new (DBUS_HASH_STRING,
+                                                           (DBusFreeFunction) dbus_free,
+                                                           free_rule_list_func);
+      if (policy->rules_by_smack_label == NULL)
+        goto failed;
+    }
+#endif
+
   return policy;
   
  failed:
@@ -229,6 +242,12 @@ bus_policy_unref (BusPolicy *policy)
         {
           _dbus_hash_table_unref (policy->rules_by_gid);
           policy->rules_by_gid = NULL;
+        }
+
+      if (policy->rules_by_smack_label)
+        {
+          _dbus_hash_table_unref (policy->rules_by_smack_label);
+          policy->rules_by_smack_label = NULL;
         }
       
       dbus_free (policy);
@@ -356,6 +375,25 @@ bus_policy_create_client_policy (BusPolicy      *policy,
         }
     }
 
+  if (policy->rules_by_smack_label &&
+      _dbus_hash_table_get_n_entries (policy->rules_by_smack_label) > 0)
+    {
+      DBusList *list = NULL;
+      dbus_bool_t nomem_err = FALSE;
+
+      if (!bus_smack_generate_allowed_list (connection, policy->rules_by_smack_label, &list))
+        goto nomem;
+
+      if (list != NULL)
+        {
+          nomem_err = !add_list_to_client (list, client);
+          _dbus_list_clear (&list);
+        }
+
+      if (nomem_err)
+        goto nomem;
+    }
+
   if (!add_list_to_client (&policy->mandatory_rules,
                            client))
     goto nomem;
@@ -403,8 +441,8 @@ list_allows_user (dbus_bool_t           def,
         }
       else if (rule->type == BUS_POLICY_RULE_GROUP)
         {
-          _dbus_verbose ("List %p group rule uid="DBUS_UID_FORMAT"\n",
-                         list, rule->d.user.uid);
+          _dbus_verbose ("List %p group rule gid="DBUS_GID_FORMAT"\n",
+                         list, rule->d.group.gid);
           
           if (rule->d.group.gid == DBUS_GID_UNSET)
             ;  /* '*' wildcard */
@@ -598,6 +636,69 @@ bus_policy_append_console_rule (BusPolicy      *policy,
 
 }
 
+/*
+ * Search table for a list that is referenced by key.
+ * If the corresponding entry does not exist create it.
+ */
+static DBusList **
+ensure_list_for_key (DBusHashTable *table,
+                     const char *key)
+{
+  DBusList **list;
+
+  if (key == NULL)
+    return NULL;
+
+  list = _dbus_hash_table_lookup_string (table, key);
+
+  if (list == NULL)
+    {
+      char *new_key;
+
+      list = dbus_new0 (DBusList*, 1);
+      if (list == NULL)
+        return NULL;
+
+      new_key = _dbus_strdup (key);
+      if (new_key == NULL)
+        {
+          dbus_free (list);
+          return NULL;
+        }
+
+      if (!_dbus_hash_table_insert_string (table, new_key, list))
+        {
+          dbus_free (list);
+          dbus_free (new_key);
+          return NULL;
+        }
+    }
+
+  return list;
+}
+
+dbus_bool_t
+bus_policy_append_smack_rule (BusPolicy      *policy,
+                              const char     *label,
+                              BusPolicyRule  *rule)
+{
+  if (!have_smack())
+    return TRUE;
+#ifdef DBUS_ENABLE_SMACK
+  DBusList **list;
+
+  list = ensure_list_for_key (policy->rules_by_smack_label, label);
+  if (list == NULL)
+    return FALSE;
+
+  if (!_dbus_list_append (list, rule))
+    return FALSE;
+
+  bus_policy_rule_ref (rule);
+#endif
+  return TRUE;
+}
+
 static dbus_bool_t
 append_copy_of_policy_list (DBusList **list,
                             DBusList **to_append)
@@ -653,6 +754,29 @@ merge_id_hash (DBusHashTable *dest,
   return TRUE;
 }
 
+static dbus_bool_t
+merge_string_hash (DBusHashTable *dest,
+                   DBusHashTable *to_absorb)
+{
+  DBusHashIter iter;
+
+  _dbus_hash_iter_init (to_absorb, &iter);
+  while (_dbus_hash_iter_next (&iter))
+    {
+      const char *absorb_label = _dbus_hash_iter_get_string_key(&iter);
+      DBusList **list = _dbus_hash_iter_get_value (&iter);
+      DBusList **target = ensure_list_for_key (dest, absorb_label);
+
+      if (target == NULL)
+        return FALSE;
+
+      if (!append_copy_of_policy_list (target, list))
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
 dbus_bool_t
 bus_policy_merge (BusPolicy *policy,
                   BusPolicy *to_absorb)
@@ -684,6 +808,13 @@ bus_policy_merge (BusPolicy *policy,
   if (!merge_id_hash (policy->rules_by_gid,
                       to_absorb->rules_by_gid))
     return FALSE;
+
+#ifdef DBUS_ENABLE_SMACK
+  if (have_smack() &&
+      !merge_string_hash (policy->rules_by_smack_label,
+                          to_absorb->rules_by_smack_label))
+    return FALSE;
+#endif
 
   return TRUE;
 }
@@ -1240,25 +1371,26 @@ bus_client_policy_check_can_receive (BusClientPolicy *policy,
   return allowed;
 }
 
-dbus_bool_t
-bus_client_policy_check_can_own (BusClientPolicy  *policy,
-                                 DBusConnection   *connection,
-                                 const DBusString *service_name)
+
+
+static dbus_bool_t
+bus_rules_check_can_own (DBusList *rules,
+                         const DBusString *service_name)
 {
   DBusList *link;
   dbus_bool_t allowed;
   
-  /* policy->rules is in the order the rules appeared
+  /* rules is in the order the rules appeared
    * in the config file, i.e. last rule that applies wins
    */
 
   allowed = FALSE;
-  link = _dbus_list_get_first_link (&policy->rules);
+  link = _dbus_list_get_first_link (&rules);
   while (link != NULL)
     {
       BusPolicyRule *rule = link->data;
 
-      link = _dbus_list_get_next_link (&policy->rules, link);
+      link = _dbus_list_get_next_link (&rules, link);
       
       /* Rule is skipped if it specifies a different service name from
        * the desired one.
@@ -1267,10 +1399,23 @@ bus_client_policy_check_can_own (BusClientPolicy  *policy,
       if (rule->type != BUS_POLICY_RULE_OWN)
         continue;
 
-      if (rule->d.own.service_name != NULL)
+      if (!rule->d.own.prefix && rule->d.own.service_name != NULL)
         {
           if (!_dbus_string_equal_c_str (service_name,
                                          rule->d.own.service_name))
+            continue;
+        }
+      else if (rule->d.own.prefix)
+        {
+          const char *data;
+          char next_char;
+          if (!_dbus_string_starts_with_c_str (service_name,
+                                               rule->d.own.service_name))
+            continue;
+
+          data = _dbus_string_get_const_data (service_name);
+          next_char = data[strlen (rule->d.own.service_name)];
+          if (next_char != '\0' && next_char != '.')
             continue;
         }
 
@@ -1281,17 +1426,19 @@ bus_client_policy_check_can_own (BusClientPolicy  *policy,
   return allowed;
 }
 
-#ifdef DBUS_BUILD_TESTS
-
 dbus_bool_t
-bus_policy_test (const DBusString *test_data_dir)
+bus_client_policy_check_can_own (BusClientPolicy  *policy,
+                                 const DBusString *service_name)
 {
-  /* This doesn't do anything for now because I decided to do it in
-   * dispatch.c instead by having some of the clients in dispatch.c
-   * have particular policies applied to them.
-   */
-  
-  return TRUE;
+  return bus_rules_check_can_own (policy->rules, service_name);
 }
 
+#ifdef DBUS_BUILD_TESTS
+dbus_bool_t
+bus_policy_check_can_own (BusPolicy  *policy,
+                          const DBusString *service_name)
+{
+  return bus_rules_check_can_own (policy->default_rules, service_name);
+}
 #endif /* DBUS_BUILD_TESTS */
+

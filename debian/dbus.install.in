@@ -1,8 +1,0 @@
-debian/tmp@PREFIX@/var/run/dbus
-debian/tmp@PREFIX@/etc/dbus-1/
-debian/tmp@PREFIX@/bin/*
-debian/tmp@PREFIX@/libexec/*
-debian/tmp@PREFIX@/share/man/man1
-debian/tmp@PREFIX@/share/dbus-1/*
-debian/tmp/etc/rc.d/rc3.d/S04dbus-daemon_run
-debian/tmp/lib/systemd

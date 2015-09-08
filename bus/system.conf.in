@@ -23,6 +23,9 @@
   <!-- We use system service launching using a helper -->
   <standard_system_servicedirs/>
 
+  <!-- SLP services used to be installed under following location -->
+  <servicedir>/usr/share/dbus-1/services</servicedir>
+
   <!-- This is a setuid helper that is used to launch system services -->
   <servicehelper>@DBUS_LIBEXECDIR@/dbus-daemon-launch-helper</servicehelper>
 
@@ -45,10 +48,8 @@
     <!-- All users can connect to system bus -->
     <allow user="*"/>
 
-    <!-- Holes must be punched in service configuration files for
-         name ownership and sending method calls -->
-    <deny own="*"/>
-    <deny send_type="method_call"/>
+    <allow own="*"/>
+    <allow send_type="method_call"/>
 
     <!-- Signals and reply messages (method returns, errors) are allowed
          by default -->

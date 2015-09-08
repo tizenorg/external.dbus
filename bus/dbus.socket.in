@@ -3,3 +3,5 @@ Description=D-Bus System Message Bus Socket
 
 [Socket]
 ListenStream=@DBUS_SYSTEM_SOCKET@
+SmackLabelIPIn=*
+SmackLabelIPOut=@

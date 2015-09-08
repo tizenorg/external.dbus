@@ -30,12 +30,58 @@
 #include "services.h"
 #include "selinux.h"
 #include "signals.h"
+#include "smack.h"
+#include "stats.h"
 #include "utils.h"
+
+#include <dbus/dbus-asv-util.h>
 #include <dbus/dbus-string.h>
 #include <dbus/dbus-internals.h>
 #include <dbus/dbus-message.h>
 #include <dbus/dbus-marshal-recursive.h>
 #include <string.h>
+
+static DBusConnection *
+bus_driver_get_conn_helper (DBusConnection  *connection,
+                            DBusMessage     *message,
+                            const char      *what_we_want,
+                            const char     **name_p,
+                            DBusError       *error)
+{
+  const char *name;
+  BusRegistry *registry;
+  BusService *serv;
+  DBusString str;
+  DBusConnection *conn;
+
+  if (!dbus_message_get_args (message, error,
+                              DBUS_TYPE_STRING, &name,
+                              DBUS_TYPE_INVALID))
+    return NULL;
+
+  _dbus_assert (name != NULL);
+  _dbus_verbose ("asked for %s of connection %s\n", what_we_want, name);
+
+  registry = bus_connection_get_registry (connection);
+  _dbus_string_init_const (&str, name);
+  serv = bus_registry_lookup (registry, &str);
+
+  if (serv == NULL)
+    {
+      dbus_set_error (error, DBUS_ERROR_NAME_HAS_NO_OWNER,
+                      "Could not get %s of name '%s': no such name",
+                      what_we_want, name);
+      return NULL;
+    }
+
+  conn = bus_service_get_primary_owners_connection (serv);
+  _dbus_assert (conn != NULL);
+
+  if (name_p != NULL)
+    *name_p = name;
+
+  return conn;
+}
 
 static dbus_bool_t bus_driver_send_welcome_message (DBusConnection *connection,
                                                     DBusMessage    *hello_message,
@@ -826,7 +872,6 @@ bus_driver_handle_update_activation_environment (DBusConnection *connection,
   DBusMessageIter iter;
   DBusMessageIter dict_iter;
   DBusMessageIter dict_entry_iter;
-  int msg_type;
   int array_type;
   int key_type;
   DBusList *keys, *key_link;
@@ -841,9 +886,13 @@ bus_driver_handle_update_activation_environment (DBusConnection *connection,
   /* The message signature has already been checked for us,
    * so let's just assert it's right.
    */
-  msg_type = dbus_message_iter_get_arg_type (&iter);
+#ifndef DBUS_DISABLE_ASSERT
+    {
+      int msg_type = dbus_message_iter_get_arg_type (&iter);
 
-  _dbus_assert (msg_type == DBUS_TYPE_ARRAY);
+      _dbus_assert (msg_type == DBUS_TYPE_ARRAY);
+    }
+#endif
 
   dbus_message_iter_recurse (&iter, &dict_iter);
 
@@ -1258,40 +1307,21 @@ bus_driver_handle_get_connection_unix_user (DBusConnection *connection,
                                             DBusMessage    *message,
                                             DBusError      *error)
 {
-  const char *service;
-  DBusString str;
-  BusRegistry *registry;
-  BusService *serv;
   DBusConnection *conn;
   DBusMessage *reply;
   unsigned long uid;
   dbus_uint32_t uid32;
+  const char *service;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  registry = bus_connection_get_registry (connection);
-
-  service = NULL;
   reply = NULL;
 
-  if (! dbus_message_get_args (message, error,
-			       DBUS_TYPE_STRING, &service,
-			       DBUS_TYPE_INVALID))
-      goto failed;
+  conn = bus_driver_get_conn_helper (connection, message, "UID", &service,
+                                     error);
 
-  _dbus_verbose ("asked for UID of connection %s\n", service);
-
-  _dbus_string_init_const (&str, service);
-  serv = bus_registry_lookup (registry, &str);
-  if (serv == NULL)
-    {
-      dbus_set_error (error,
-		      DBUS_ERROR_NAME_HAS_NO_OWNER,
-		      "Could not get UID of name '%s': no such name", service);
-      goto failed;
-    }
-
-  conn = bus_service_get_primary_owners_connection (serv);
+  if (conn == NULL)
+    goto failed;
 
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
@@ -1334,40 +1364,21 @@ bus_driver_handle_get_connection_unix_process_id (DBusConnection *connection,
 						  DBusMessage    *message,
 						  DBusError      *error)
 {
-  const char *service;
-  DBusString str;
-  BusRegistry *registry;
-  BusService *serv;
   DBusConnection *conn;
   DBusMessage *reply;
   unsigned long pid;
   dbus_uint32_t pid32;
+  const char *service;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  registry = bus_connection_get_registry (connection);
-
-  service = NULL;
   reply = NULL;
 
-  if (! dbus_message_get_args (message, error,
-			       DBUS_TYPE_STRING, &service,
-			       DBUS_TYPE_INVALID))
-      goto failed;
+  conn = bus_driver_get_conn_helper (connection, message, "PID", &service,
+                                     error);
 
-  _dbus_verbose ("asked for PID of connection %s\n", service);
-
-  _dbus_string_init_const (&str, service);
-  serv = bus_registry_lookup (registry, &str);
-  if (serv == NULL)
-    {
-      dbus_set_error (error,
-		      DBUS_ERROR_NAME_HAS_NO_OWNER,
-		      "Could not get PID of name '%s': no such name", service);
-      goto failed;
-    }
-
-  conn = bus_service_get_primary_owners_connection (serv);
+  if (conn == NULL)
+    goto failed;
 
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
@@ -1410,40 +1421,21 @@ bus_driver_handle_get_adt_audit_session_data (DBusConnection *connection,
 					      DBusMessage    *message,
 					      DBusError      *error)
 {
-  const char *service;
-  DBusString str;
-  BusRegistry *registry;
-  BusService *serv;
   DBusConnection *conn;
   DBusMessage *reply;
   void *data = NULL;
   dbus_uint32_t data_size;
+  const char *service;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  registry = bus_connection_get_registry (connection);
-
-  service = NULL;
   reply = NULL;
 
-  if (! dbus_message_get_args (message, error,
-			       DBUS_TYPE_STRING, &service,
-			       DBUS_TYPE_INVALID))
-      goto failed;
+  conn = bus_driver_get_conn_helper (connection, message,
+                                     "audit session data", &service, error);
 
-  _dbus_verbose ("asked for audit session data for connection %s\n", service);
-
-  _dbus_string_init_const (&str, service);
-  serv = bus_registry_lookup (registry, &str);
-  if (serv == NULL)
-    {
-      dbus_set_error (error,
-		      DBUS_ERROR_NAME_HAS_NO_OWNER,
-		      "Could not get audit session data for name '%s': no such name", service);
-      goto failed;
-    }
-
-  conn = bus_service_get_primary_owners_connection (serv);
+  if (conn == NULL)
+    goto failed;
 
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
@@ -1485,39 +1477,20 @@ bus_driver_handle_get_connection_selinux_security_context (DBusConnection *conne
 							   DBusMessage    *message,
 							   DBusError      *error)
 {
-  const char *service;
-  DBusString str;
-  BusRegistry *registry;
-  BusService *serv;
   DBusConnection *conn;
   DBusMessage *reply;
   BusSELinuxID *context;
+  const char *service;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  registry = bus_connection_get_registry (connection);
-
-  service = NULL;
   reply = NULL;
 
-  if (! dbus_message_get_args (message, error,
-			       DBUS_TYPE_STRING, &service,
-			       DBUS_TYPE_INVALID))
-      goto failed;
+  conn = bus_driver_get_conn_helper (connection, message, "security context",
+                                     &service, error);
 
-  _dbus_verbose ("asked for security context of connection %s\n", service);
-
-  _dbus_string_init_const (&str, service);
-  serv = bus_registry_lookup (registry, &str);
-  if (serv == NULL)
-    {
-      dbus_set_error (error,
-		      DBUS_ERROR_NAME_HAS_NO_OWNER,
-		      "Could not get security context of name '%s': no such name", service);
-      goto failed;
-    }
-
-  conn = bus_service_get_primary_owners_connection (serv);
+  if (conn == NULL)
+    goto failed;
 
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
@@ -1549,6 +1522,86 @@ bus_driver_handle_get_connection_selinux_security_context (DBusConnection *conne
   _DBUS_ASSERT_ERROR_IS_SET (error);
   if (reply)
     dbus_message_unref (reply);
+  return FALSE;
+}
+
+static dbus_bool_t
+bus_driver_handle_get_connection_credentials (DBusConnection *connection,
+                                              BusTransaction *transaction,
+                                              DBusMessage    *message,
+                                              DBusError      *error)
+{
+  DBusConnection *conn;
+  DBusMessage *reply;
+  DBusMessageIter reply_iter;
+  DBusMessageIter array_iter;
+  unsigned long ulong_val;
+  const char *service;
+  char *smack_ctx;
+
+  _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+
+  reply = NULL;
+
+  conn = bus_driver_get_conn_helper (connection, message, "credentials",
+                                     &service, error);
+
+  if (conn == NULL)
+    goto failed;
+
+  reply = _dbus_asv_new_method_return (message, &reply_iter, &array_iter);
+  if (reply == NULL)
+    goto oom;
+
+  /* we can't represent > 32-bit pids */
+  if (dbus_connection_get_unix_process_id (conn, &ulong_val) &&
+      ulong_val <= _DBUS_UINT32_MAX)
+    {
+      if (!_dbus_asv_add_uint32 (&array_iter, "UnixProcessID", ulong_val))
+        goto oom;
+    }
+
+  /* we can't represent > 32-bit uids */
+  if (dbus_connection_get_unix_user (conn, &ulong_val) &&
+      ulong_val <= _DBUS_UINT32_MAX)
+    {
+      if (!_dbus_asv_add_uint32 (&array_iter, "UnixUserID", ulong_val))
+        goto oom;
+    }
+
+  smack_ctx = bus_connection_get_smack_label (conn);
+  if (smack_ctx)
+    {
+      if (!_dbus_asv_add_string(&array_iter, "SmackContext", smack_ctx))
+        goto oom;
+    }
+
+  if (!_dbus_asv_close (&reply_iter, &array_iter))
+    goto oom;
+
+  if (! bus_transaction_send_from_driver (transaction, connection, reply))
+    {
+      /* this time we don't want to close the iterator again, so just
+       * get rid of the message */
+      dbus_message_unref (reply);
+      reply = NULL;
+      goto oom;
+    }
+
+  return TRUE;
+
+ oom:
+  BUS_SET_OOM (error);
+
+ failed:
+  _DBUS_ASSERT_ERROR_IS_SET (error);
+
+  if (reply)
+    {
+      _dbus_asv_abandon (&reply_iter, &array_iter);
+      dbus_message_unref (reply);
+    }
+
   return FALSE;
 }
 
@@ -1644,11 +1697,7 @@ bus_driver_handle_get_id (DBusConnection *connection,
   return FALSE;
 }
 
-/* For speed it might be useful to sort this in order of
- * frequency of use (but doesn't matter with only a few items
- * anyhow)
- */
-static struct
+typedef struct
 {
   const char *name;
   const char *in_args;
@@ -1657,7 +1706,13 @@ static struct
                            BusTransaction *transaction,
                            DBusMessage    *message,
                            DBusError      *error);
-} message_handlers[] = {
+} MessageHandler;
+
+/* For speed it might be useful to sort this in order of
+ * frequency of use (but doesn't matter with only a few items
+ * anyhow)
+ */
+static const MessageHandler dbus_message_handlers[] = {
   { "Hello",
     "",
     DBUS_TYPE_STRING_AS_STRING,
@@ -1729,7 +1784,54 @@ static struct
   { "GetId",
     "",
     DBUS_TYPE_STRING_AS_STRING,
-    bus_driver_handle_get_id }
+    bus_driver_handle_get_id },
+  { "GetConnectionCredentials", "s", "a{sv}",
+    bus_driver_handle_get_connection_credentials },
+  { NULL, NULL, NULL, NULL }
+};
+
+static dbus_bool_t bus_driver_handle_introspect (DBusConnection *,
+    BusTransaction *, DBusMessage *, DBusError *);
+
+static const MessageHandler introspectable_message_handlers[] = {
+  { "Introspect", "", DBUS_TYPE_STRING_AS_STRING, bus_driver_handle_introspect },
+  { NULL, NULL, NULL, NULL }
+};
+
+#ifdef DBUS_ENABLE_STATS
+static const MessageHandler stats_message_handlers[] = {
+  { "GetStats", "", "a{sv}", bus_stats_handle_get_stats },
+  { "GetConnectionStats", "s", "a{sv}", bus_stats_handle_get_connection_stats },
+  { NULL, NULL, NULL, NULL }
+};
+#endif
+
+typedef struct {
+  const char *name;
+  const MessageHandler *message_handlers;
+  const char *extra_introspection;
+} InterfaceHandler;
+
+/* These should ideally be sorted by frequency of use, although it
+ * probably doesn't matter with this few items */
+static InterfaceHandler interface_handlers[] = {
+  { DBUS_INTERFACE_DBUS, dbus_message_handlers,
+    "    <signal name=\"NameOwnerChanged\">\n"
+    "      <arg type=\"s\"/>\n"
+    "      <arg type=\"s\"/>\n"
+    "      <arg type=\"s\"/>\n"
+    "    </signal>\n"
+    "    <signal name=\"NameLost\">\n"
+    "      <arg type=\"s\"/>\n"
+    "    </signal>\n"
+    "    <signal name=\"NameAcquired\">\n"
+    "      <arg type=\"s\"/>\n"
+    "    </signal>\n" },
+  { DBUS_INTERFACE_INTROSPECTABLE, introspectable_message_handlers, NULL },
+#ifdef DBUS_ENABLE_STATS
+  { BUS_INTERFACE_STATS, stats_message_handlers, NULL },
+#endif
+  { NULL, NULL, NULL }
 };
 
 static dbus_bool_t
@@ -1770,86 +1872,43 @@ write_args_for_direction (DBusString *xml,
 dbus_bool_t
 bus_driver_generate_introspect_string (DBusString *xml)
 {
-  int i;
+  const InterfaceHandler *ih;
+  const MessageHandler *mh;
 
   if (!_dbus_string_append (xml, DBUS_INTROSPECT_1_0_XML_DOCTYPE_DECL_NODE))
     return FALSE;
   if (!_dbus_string_append (xml, "<node>\n"))
     return FALSE;
-  if (!_dbus_string_append_printf (xml, "  <interface name=\"%s\">\n", DBUS_INTERFACE_INTROSPECTABLE))
-    return FALSE;
-  if (!_dbus_string_append (xml, "    <method name=\"Introspect\">\n"))
-    return FALSE;
-  if (!_dbus_string_append_printf (xml, "      <arg name=\"data\" direction=\"out\" type=\"%s\"/>\n", DBUS_TYPE_STRING_AS_STRING))
-    return FALSE;
-  if (!_dbus_string_append (xml, "    </method>\n"))
-    return FALSE;
-  if (!_dbus_string_append (xml, "  </interface>\n"))
-    return FALSE;
 
-  if (!_dbus_string_append_printf (xml, "  <interface name=\"%s\">\n",
-                                   DBUS_INTERFACE_DBUS))
-    return FALSE;
-
-  i = 0;
-  while (i < _DBUS_N_ELEMENTS (message_handlers))
+  for (ih = interface_handlers; ih->name != NULL; ih++)
     {
-
-      if (!_dbus_string_append_printf (xml, "    <method name=\"%s\">\n",
-                                       message_handlers[i].name))
+      if (!_dbus_string_append_printf (xml, "  <interface name=\"%s\">\n",
+                                       ih->name))
         return FALSE;
 
-      if (!write_args_for_direction (xml, message_handlers[i].in_args, TRUE))
-	return FALSE;
+      for (mh = ih->message_handlers; mh->name != NULL; mh++)
+        {
+          if (!_dbus_string_append_printf (xml, "    <method name=\"%s\">\n",
+                                           mh->name))
+            return FALSE;
 
-      if (!write_args_for_direction (xml, message_handlers[i].out_args, FALSE))
-	return FALSE;
+          if (!write_args_for_direction (xml, mh->in_args, TRUE))
+            return FALSE;
 
-      if (!_dbus_string_append (xml, "    </method>\n"))
-	return FALSE;
+          if (!write_args_for_direction (xml, mh->out_args, FALSE))
+            return FALSE;
 
-      ++i;
+          if (!_dbus_string_append (xml, "    </method>\n"))
+            return FALSE;
+        }
+
+      if (ih->extra_introspection != NULL &&
+          !_dbus_string_append (xml, ih->extra_introspection))
+        return FALSE;
+
+      if (!_dbus_string_append (xml, "  </interface>\n"))
+        return FALSE;
     }
-
-  if (!_dbus_string_append_printf (xml, "    <signal name=\"NameOwnerChanged\">\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "      <arg type=\"s\"/>\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "      <arg type=\"s\"/>\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "      <arg type=\"s\"/>\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "    </signal>\n"))
-    return FALSE;
-
-
-
-  if (!_dbus_string_append_printf (xml, "    <signal name=\"NameLost\">\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "      <arg type=\"s\"/>\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "    </signal>\n"))
-    return FALSE;
-
-
-
-  if (!_dbus_string_append_printf (xml, "    <signal name=\"NameAcquired\">\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "      <arg type=\"s\"/>\n"))
-    return FALSE;
-
-  if (!_dbus_string_append_printf (xml, "    </signal>\n"))
-    return FALSE;
-
-  if (!_dbus_string_append (xml, "  </interface>\n"))
-    return FALSE;
 
   if (!_dbus_string_append (xml, "</node>\n"))
     return FALSE;
@@ -1925,8 +1984,10 @@ bus_driver_handle_message (DBusConnection *connection,
 			   DBusMessage    *message,
                            DBusError      *error)
 {
-  const char *name, *sender, *interface;
-  int i;
+  const char *name, *interface;
+  const InterfaceHandler *ih;
+  const MessageHandler *mh;
+  dbus_bool_t found_interface = FALSE;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
@@ -1944,57 +2005,54 @@ bus_driver_handle_message (DBusConnection *connection,
       return TRUE; /* we just ignore this */
     }
 
-  if (dbus_message_is_method_call (message,
-                                   DBUS_INTERFACE_INTROSPECTABLE,
-                                   "Introspect"))
-    return bus_driver_handle_introspect (connection, transaction, message, error);
-
+  /* may be NULL, which means "any interface will do" */
   interface = dbus_message_get_interface (message);
-  if (interface == NULL)
-    interface = DBUS_INTERFACE_DBUS;
 
   _dbus_assert (dbus_message_get_member (message) != NULL);
 
   name = dbus_message_get_member (message);
-  sender = dbus_message_get_sender (message);
 
-  if (strcmp (interface,
-              DBUS_INTERFACE_DBUS) != 0)
-    {
-      _dbus_verbose ("Driver got message to unknown interface \"%s\"\n",
-                     interface);
-      goto unknown;
-    }
-
-  _dbus_verbose ("Driver got a method call: %s\n",
-		 dbus_message_get_member (message));
+  _dbus_verbose ("Driver got a method call: %s\n", name);
 
   /* security checks should have kept this from getting here */
-  _dbus_assert (sender != NULL || strcmp (name, "Hello") == 0);
-
-  i = 0;
-  while (i < _DBUS_N_ELEMENTS (message_handlers))
+#ifndef DBUS_DISABLE_ASSERT
     {
-      if (strcmp (message_handlers[i].name, name) == 0)
+      const char *sender = dbus_message_get_sender (message);
+
+      _dbus_assert (sender != NULL || strcmp (name, "Hello") == 0);
+    }
+#endif
+
+  for (ih = interface_handlers; ih->name != NULL; ih++)
+    {
+      if (interface != NULL && strcmp (interface, ih->name) != 0)
+        continue;
+
+      found_interface = TRUE;
+
+      for (mh = ih->message_handlers; mh->name != NULL; mh++)
         {
+          if (strcmp (mh->name, name) != 0)
+            continue;
+
           _dbus_verbose ("Found driver handler for %s\n", name);
 
-          if (!dbus_message_has_signature (message, message_handlers[i].in_args))
+          if (!dbus_message_has_signature (message, mh->in_args))
             {
               _DBUS_ASSERT_ERROR_IS_CLEAR (error);
               _dbus_verbose ("Call to %s has wrong args (%s, expected %s)\n",
                              name, dbus_message_get_signature (message),
-                             message_handlers[i].in_args);
+                             mh->in_args);
 
               dbus_set_error (error, DBUS_ERROR_INVALID_ARGS,
                               "Call to %s has wrong args (%s, expected %s)\n",
                               name, dbus_message_get_signature (message),
-                              message_handlers[i].in_args);
+                              mh->in_args);
               _DBUS_ASSERT_ERROR_IS_SET (error);
               return FALSE;
             }
 
-          if ((* message_handlers[i].handler) (connection, transaction, message, error))
+          if ((* mh->handler) (connection, transaction, message, error))
             {
               _DBUS_ASSERT_ERROR_IS_CLEAR (error);
               _dbus_verbose ("Driver handler succeeded\n");
@@ -2007,15 +2065,12 @@ bus_driver_handle_message (DBusConnection *connection,
               return FALSE;
             }
         }
-
-      ++i;
     }
 
- unknown:
   _dbus_verbose ("No driver handler for message \"%s\"\n",
                  name);
 
-  dbus_set_error (error, DBUS_ERROR_UNKNOWN_METHOD,
+  dbus_set_error (error, found_interface ? DBUS_ERROR_UNKNOWN_METHOD : DBUS_ERROR_UNKNOWN_INTERFACE,
                   "%s does not understand message %s",
                   DBUS_SERVICE_DBUS, name);
 
