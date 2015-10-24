@@ -48,6 +48,11 @@ typedef void (* DBusNewConnectionFunction) (DBusServer     *server,
                                             DBusConnection *new_connection,
                                             void           *data);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBUS_EXPORT
+DBusServer* dbus_server_init_mini		 (char* address);
+#endif
+
 DBUS_EXPORT
 DBusServer* dbus_server_listen           (const char     *address,
                                           DBusError      *error);

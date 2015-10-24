@@ -679,22 +679,26 @@ bus_desktop_file_load (DBusString *filename,
   while (parser.pos < parser.len)
     {
       if (_dbus_string_get_byte (&parser.data, parser.pos) == '[')
-	{
-	  if (!parse_section_start (&parser, error))
-            {
-              return NULL;
-            }
-	}
+        {
+          if (!parse_section_start (&parser, error))
+            return NULL;
+        }
       else if (is_blank_line (&parser) ||
 	       _dbus_string_get_byte (&parser.data, parser.pos) == '#')
 	parse_comment_or_blank (&parser);
+      else if (parser.current_section < 0)
+        {
+           dbus_set_error(error, DBUS_ERROR_FAILED,
+                          "invalid service file: key=value before [Section]");
+           _dbus_string_free (&parser.data);
+           bus_desktop_file_free(parser.desktop_file);
+           return NULL;
+        }
       else
-	{
-	  if (!parse_key_value (&parser, error))
-            {
-              return NULL;
-            }
-	}
+        {
+          if (!parse_key_value (&parser, error))
+            return NULL;
+        }
     }
 
   _dbus_string_free (&parser.data);

@@ -1,0 +1,14 @@
+
+#
+# This is the D-Bus service for the session
+#
+
+[Unit]
+Description=D-Bus Session Message Bus
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/dbus-daemon --session --address=kernel: --nofork --systemd-activation
+ExecReload=/usr/bin/dbus-send --print-reply --session --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig
+ExecStartPost=/bin/touch %t/dbus/user_bus_socket
+OOMScoreAdjust=-900

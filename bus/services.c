@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2003  Red Hat, Inc.
  * Copyright (C) 2003  CodeFactory AB
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  * 
@@ -36,6 +37,18 @@
 #include "policy.h"
 #include "bus.h"
 #include "selinux.h"
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include <linux/types.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <limits.h>
+
+#include "kdbus-d.h"
+#include <linux/kdbus.h>
+#include "dbus/kdbus-common.h"
+#endif
 
 struct BusService
 {
@@ -171,6 +184,30 @@ _bus_service_find_owner_link (BusService *service,
 
   return link;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+static DBusConnection *
+_bus_service_find_owner_connection (BusService *service,
+                                   const char* unique_name)
+{
+  DBusList *link;
+
+  link = _dbus_list_get_first_link (&service->owners);
+
+  while (link != NULL)
+    {
+      BusOwner *bus_owner;
+
+      bus_owner = (BusOwner *) link->data;
+      if(!strcmp(bus_connection_get_name(bus_owner->conn), unique_name))
+          return bus_owner->conn;
+
+      link = _dbus_list_get_next_link (&service->owners, link);
+    }
+
+  return NULL;
+}
+#endif
 
 static void
 bus_owner_set_flags (BusOwner *owner,
@@ -368,7 +405,7 @@ bus_registry_list_services (BusRegistry *registry,
   
  error:
   for (j = 0; j < i; j++)
-    dbus_free (retval[i]);
+    dbus_free (retval[j]);
   dbus_free (retval);
 
   return FALSE;
@@ -588,8 +625,9 @@ bus_registry_acquire_service (BusRegistry      *registry,
   activation = bus_context_get_activation (registry->context);
   retval = bus_activation_send_pending_auto_activation_messages (activation,
 								 service,
-								 transaction,
-								 error);
+								 transaction);
+  if (!retval)
+    BUS_SET_OOM (error);
   
  out:
   return retval;
@@ -1216,17 +1254,56 @@ bus_service_unref (BusService *service)
     }
 }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+char*
+bus_service_get_primary_owners_unique_name (BusService *service)
+{
+  BusOwner *owner;
+  char *name;
+  char unique_name[128];
+
+  owner = bus_service_get_primary_owner(service);
+
+  if(!owner)
+    return NULL;
+
+  if(kdbus_get_name_owner(dbus_connection_get_transport(owner->conn), bus_service_get_name(service), unique_name) < 0)
+    return NULL;
+
+  if(asprintf(&name, "%s", unique_name) < 0)
+    return NULL;
+
+  return name;
+}
+#endif
+
 DBusConnection *
 bus_service_get_primary_owners_connection (BusService *service)
 {
   BusOwner *owner;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  char unique_name[(unsigned int)(snprintf((char*)NULL, 0, "%llu", ULLONG_MAX) + sizeof(":1."))];
+#endif
 
   owner = bus_service_get_primary_owner (service);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(!owner)
+    return NULL;
+  if(bus_context_is_kdbus(service->registry->context))
+  {
+    if(kdbus_get_name_owner(dbus_connection_get_transport(owner->conn), bus_service_get_name(service), unique_name) < 0)
+      return NULL;
+    return _bus_service_find_owner_connection(service, unique_name);  //bus_connections_find_conn_by_name would be safer? but slower
+  }
+  else
+    return owner->conn;
+#else
   if (owner != NULL)
     return owner->conn;
   else
     return NULL;
+#endif
 }
 
 BusOwner*

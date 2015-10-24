@@ -29,7 +29,6 @@
 #include <glib.h>
 
 #include <dbus/dbus.h>
-#include <dbus/dbus-glib-lowlevel.h>
 
 #include <string.h>
 
@@ -42,8 +41,12 @@
 # include <sys/types.h>
 #endif
 
+#include "test-utils.h"
+
 typedef struct {
     gboolean skip;
+
+    TestMainContext *ctx;
 
     DBusError e;
     GError *ge;
@@ -116,6 +119,8 @@ spawn_dbus_daemon (gchar *binary,
 
       if (newline != NULL)
         {
+          if ((newline > address->str) && ('\r' == newline[-1]))
+            newline -= 1;
           g_string_truncate (address, newline - address->str);
           break;
         }
@@ -127,7 +132,8 @@ spawn_dbus_daemon (gchar *binary,
 }
 
 static DBusConnection *
-connect_to_bus (const gchar *address)
+connect_to_bus (Fixture *f,
+    const gchar *address)
 {
   DBusConnection *conn;
   DBusError error = DBUS_ERROR_INIT;
@@ -142,7 +148,7 @@ connect_to_bus (const gchar *address)
   g_assert (ok);
   g_assert (dbus_bus_get_unique_name (conn) != NULL);
 
-  dbus_connection_setup_with_g_main (conn, NULL);
+  test_connection_setup (f->ctx, conn);
   return conn;
 }
 
@@ -184,11 +190,20 @@ setup (Fixture *f,
   gchar *arg;
   gchar *address;
 
+  f->ctx = test_main_context_get ();
   f->ge = NULL;
   dbus_error_init (&f->e);
 
   if (config != NULL && config->config_file != NULL)
     {
+      if (g_getenv ("DBUS_TEST_DAEMON_ADDRESS") != NULL)
+        {
+          g_message ("SKIP: cannot use DBUS_TEST_DAEMON_ADDRESS for "
+              "unusally-configured dbus-daemon");
+          f->skip = TRUE;
+          return;
+        }
+
       if (g_getenv ("DBUS_TEST_DATA") == NULL)
         {
           g_message ("SKIP: set DBUS_TEST_DATA to a directory containing %s",
@@ -222,13 +237,20 @@ setup (Fixture *f,
   if (dbus_daemon == NULL)
     dbus_daemon = g_strdup ("dbus-daemon");
 
-  address = spawn_dbus_daemon (dbus_daemon, arg, &f->daemon_pid);
+  if (g_getenv ("DBUS_TEST_DAEMON_ADDRESS") != NULL)
+    {
+      address = g_strdup (g_getenv ("DBUS_TEST_DAEMON_ADDRESS"));
+    }
+  else
+    {
+      address = spawn_dbus_daemon (dbus_daemon, arg, &f->daemon_pid);
+    }
 
   g_free (dbus_daemon);
   g_free (arg);
 
-  f->left_conn = connect_to_bus (address);
-  f->right_conn = connect_to_bus (address);
+  f->left_conn = connect_to_bus (f, address);
+  f->right_conn = connect_to_bus (f, address);
   g_free (address);
 }
 
@@ -302,7 +324,7 @@ test_echo (Fixture *f,
     }
 
   while (received < count)
-    g_main_context_iteration (NULL, TRUE);
+    test_main_context_iterate (f->ctx, TRUE);
 
   elapsed = g_test_timer_elapsed ();
 
@@ -311,7 +333,7 @@ test_echo (Fixture *f,
 }
 
 static void
-pc_store (DBusPendingCall *pc,
+pending_call_store_reply (DBusPendingCall *pc,
     void *data)
 {
   DBusMessage **message_p = data;
@@ -334,7 +356,7 @@ test_creds (Fixture *f,
   DBusMessageIter var_iter;
   enum {
       SEEN_UNIX_USER = 1,
-      SEEN_UNIX_PID = 2,
+      SEEN_PID = 2,
       SEEN_WINDOWS_SID = 4
   } seen = 0;
 
@@ -355,12 +377,13 @@ test_creds (Fixture *f,
   m = NULL;
 
   if (dbus_pending_call_get_completed (pc))
-    pc_store (pc, &m);
-  else if (!dbus_pending_call_set_notify (pc, pc_store, &m, NULL))
+    pending_call_store_reply (pc, &m);
+  else if (!dbus_pending_call_set_notify (pc, pending_call_store_reply,
+                                          &m, NULL))
     g_error ("OOM");
 
   while (m == NULL)
-    g_main_context_iteration (NULL, TRUE);
+    test_main_context_iterate (f->ctx, TRUE);
 
   g_assert_cmpstr (dbus_message_get_signature (m), ==, "a{sv}");
 
@@ -389,6 +412,7 @@ test_creds (Fixture *f,
 #ifdef G_OS_UNIX
           guint32 u32;
 
+          g_assert (!(seen & SEEN_UNIX_USER));
           g_assert_cmpuint (dbus_message_iter_get_arg_type (&var_iter), ==,
               DBUS_TYPE_UINT32);
           dbus_message_iter_get_basic (&var_iter, &u32);
@@ -399,20 +423,23 @@ test_creds (Fixture *f,
           g_assert_not_reached ();
 #endif
         }
-      else if (g_strcmp0 (name, "UnixProcessID") == 0)
+      else if (g_strcmp0 (name, "ProcessID") == 0)
         {
-#ifdef G_OS_UNIX
           guint32 u32;
 
+          g_assert (!(seen & SEEN_PID));
           g_assert_cmpuint (dbus_message_iter_get_arg_type (&var_iter), ==,
               DBUS_TYPE_UINT32);
           dbus_message_iter_get_basic (&var_iter, &u32);
           g_message ("%s of this process is %u", name, u32);
+#ifdef G_OS_UNIX
           g_assert_cmpuint (u32, ==, getpid ());
-          seen |= SEEN_UNIX_PID;
+#elif defined(G_OS_WIN32)
+          g_assert_cmpuint (u32, ==, GetCurrentProcessId ());
 #else
           g_assert_not_reached ();
 #endif
+          seen |= SEEN_PID;
         }
 
       dbus_message_iter_next (&arr_iter);
@@ -420,7 +447,7 @@ test_creds (Fixture *f,
 
 #ifdef G_OS_UNIX
   g_assert (seen & SEEN_UNIX_USER);
-  g_assert (seen & SEEN_UNIX_PID);
+  g_assert (seen & SEEN_PID);
 #endif
 
 #ifdef G_OS_WIN32
@@ -428,6 +455,91 @@ test_creds (Fixture *f,
   g_assert (seen & SEEN_WINDOWS_SID);
    */
 #endif
+}
+
+static void
+test_canonical_path_uae (Fixture *f,
+    gconstpointer context)
+{
+  DBusMessage *m = dbus_message_new_method_call (DBUS_SERVICE_DBUS,
+      DBUS_PATH_DBUS, DBUS_INTERFACE_DBUS, "UpdateActivationEnvironment");
+  DBusPendingCall *pc;
+  DBusMessageIter args_iter;
+  DBusMessageIter arr_iter;
+
+  if (m == NULL)
+    g_error ("OOM");
+
+  dbus_message_iter_init_append (m, &args_iter);
+
+  /* Append an empty a{ss} (string => string dictionary). */
+  if (!dbus_message_iter_open_container (&args_iter, DBUS_TYPE_ARRAY,
+        "{ss}", &arr_iter) ||
+      !dbus_message_iter_close_container (&args_iter, &arr_iter))
+    g_error ("OOM");
+
+  if (!dbus_connection_send_with_reply (f->left_conn, m, &pc,
+                                        DBUS_TIMEOUT_USE_DEFAULT) ||
+      pc == NULL)
+    g_error ("OOM");
+
+  dbus_message_unref (m);
+  m = NULL;
+
+  if (dbus_pending_call_get_completed (pc))
+    pending_call_store_reply (pc, &m);
+  else if (!dbus_pending_call_set_notify (pc, pending_call_store_reply,
+                                          &m, NULL))
+    g_error ("OOM");
+
+  while (m == NULL)
+    test_main_context_iterate (f->ctx, TRUE);
+
+  /* it succeeds */
+  g_assert_cmpint (dbus_message_get_type (m), ==,
+      DBUS_MESSAGE_TYPE_METHOD_RETURN);
+
+  dbus_message_unref (m);
+
+  /* Now try with the wrong object path */
+  m = dbus_message_new_method_call (DBUS_SERVICE_DBUS,
+      "/com/example/Wrong", DBUS_INTERFACE_DBUS, "UpdateActivationEnvironment");
+
+  if (m == NULL)
+    g_error ("OOM");
+
+  dbus_message_iter_init_append (m, &args_iter);
+
+  /* Append an empty a{ss} (string => string dictionary). */
+  if (!dbus_message_iter_open_container (&args_iter, DBUS_TYPE_ARRAY,
+        "{ss}", &arr_iter) ||
+      !dbus_message_iter_close_container (&args_iter, &arr_iter))
+    g_error ("OOM");
+
+  if (!dbus_connection_send_with_reply (f->left_conn, m, &pc,
+                                        DBUS_TIMEOUT_USE_DEFAULT) ||
+      pc == NULL)
+    g_error ("OOM");
+
+  dbus_message_unref (m);
+  m = NULL;
+
+  if (dbus_pending_call_get_completed (pc))
+    pending_call_store_reply (pc, &m);
+  else if (!dbus_pending_call_set_notify (pc, pending_call_store_reply,
+                                          &m, NULL))
+    g_error ("OOM");
+
+  while (m == NULL)
+    test_main_context_iterate (f->ctx, TRUE);
+
+  /* it fails, yielding an error message with one string argument */
+  g_assert_cmpint (dbus_message_get_type (m), ==, DBUS_MESSAGE_TYPE_ERROR);
+  g_assert_cmpstr (dbus_message_get_error_name (m), ==,
+      DBUS_ERROR_ACCESS_DENIED);
+  g_assert_cmpstr (dbus_message_get_signature (m), ==, "s");
+
+  dbus_message_unref (m);
 }
 
 static void
@@ -468,6 +580,8 @@ teardown (Fixture *f,
       g_spawn_close_pid (f->daemon_pid);
       f->daemon_pid = 0;
     }
+
+  test_main_context_unref (f->ctx);
 }
 
 static Config limited_config = {
@@ -485,6 +599,8 @@ main (int argc,
   g_test_add ("/echo/limited", Fixture, &limited_config,
       setup, test_echo, teardown);
   g_test_add ("/creds", Fixture, NULL, setup, test_creds, teardown);
+  g_test_add ("/canonical-path/uae", Fixture, NULL,
+      setup, test_canonical_path_uae, teardown);
 
   return g_test_run ();
 }

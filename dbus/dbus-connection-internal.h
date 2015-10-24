@@ -42,7 +42,11 @@ typedef enum
 } DBusIterationFlags;
 
 /** default timeout value when waiting for a message reply, 25 seconds */
-#define _DBUS_DEFAULT_TIMEOUT_VALUE (25 * 1000)
+//#define _DBUS_DEFAULT_TIMEOUT_VALUE (25 * 1000)
+/** default timeout value when waiting for a message reply, from 25->15secs (SWC) */
+#define _DBUS_DEFAULT_TIMEOUT_VALUE (15 * 1000)
+
+typedef void (* DBusPendingFdsChangeFunction) (void *data);
 
 void              _dbus_connection_lock                        (DBusConnection     *connection);
 void              _dbus_connection_unlock                      (DBusConnection     *connection);
@@ -72,6 +76,9 @@ void              _dbus_connection_toggle_timeout_unlocked     (DBusConnection  
                                                                 DBusTimeout        *timeout,
                                                                 dbus_bool_t         enabled);
 DBusConnection*   _dbus_connection_new_for_transport           (DBusTransport      *transport);
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusConnection*   _dbus_connection_new_for_used_transport       (DBusTransport *transport);
+#endif
 void              _dbus_connection_do_iteration_unlocked       (DBusConnection     *connection,
                                                                 DBusPendingCall    *pending,
                                                                 unsigned int        flags,
@@ -100,6 +107,10 @@ void              _dbus_connection_test_get_locks                 (DBusConnectio
                                                                    DBusMutex **io_path_mutex_loc,
                                                                    DBusCondVar **dispatch_cond_loc,
                                                                    DBusCondVar **io_path_cond_loc);
+int               _dbus_connection_get_pending_fds_count          (DBusConnection *connection);
+void              _dbus_connection_set_pending_fds_function       (DBusConnection *connection,
+                                                                   DBusPendingFdsChangeFunction callback,
+                                                                   void *data);
 
 /* if DBUS_ENABLE_STATS */
 void _dbus_connection_get_stats (DBusConnection *connection,
@@ -115,7 +126,7 @@ void _dbus_connection_get_stats (DBusConnection *connection,
                                  dbus_uint32_t  *out_peak_fds);
 
 
-/* if DBUS_BUILD_TESTS */
+/* if DBUS_ENABLE_EMBEDDED_TESTS */
 const char* _dbus_connection_get_address (DBusConnection *connection);
 
 /* This _dbus_bus_* stuff doesn't really belong here, but dbus-bus-internal.h seems

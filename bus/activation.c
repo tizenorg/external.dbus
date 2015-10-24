@@ -4,6 +4,7 @@
  * Copyright (C) 2003  CodeFactory AB
  * Copyright (C) 2003  Red Hat, Inc.
  * Copyright (C) 2004  Imendio HB
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  *
@@ -40,6 +41,9 @@
 #include <dbus/dbus-sysdeps.h>
 #ifdef HAVE_ERRNO_H
 #include <errno.h>
+#endif
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "kdbus-d.h"
 #endif
 
 struct BusActivation
@@ -1153,6 +1157,14 @@ bus_activation_service_created (BusActivation  *activation,
       link = next;
     }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      _dbus_hash_table_remove_string (activation->pending_activations, service_name);
+      enable_activator_watch(bus_context_get_connections(activation->context), service_name);
+    }
+#endif
+
   return TRUE;
 
  error:
@@ -1162,13 +1174,10 @@ bus_activation_service_created (BusActivation  *activation,
 dbus_bool_t
 bus_activation_send_pending_auto_activation_messages (BusActivation  *activation,
                                                       BusService     *service,
-                                                      BusTransaction *transaction,
-                                                      DBusError      *error)
+                                                      BusTransaction *transaction)
 {
   BusPendingActivation *pending_activation;
   DBusList *link;
-
-  _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
   /* Check if it's a pending activation */
   pending_activation = _dbus_hash_table_lookup_string (activation->pending_activations,
@@ -1186,15 +1195,37 @@ bus_activation_send_pending_auto_activation_messages (BusActivation  *activation
       if (entry->auto_activation && (entry->connection == NULL || dbus_connection_get_is_connected (entry->connection)))
         {
           DBusConnection *addressed_recipient;
+          DBusError error;
 
-          addressed_recipient = bus_service_get_primary_owners_connection (service);
+          dbus_error_init (&error);
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+          if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+              addressed_recipient = entry->connection;
+          else
+#endif
+              addressed_recipient = bus_service_get_primary_owners_connection (service);
 
           /* Resume dispatching where we left off in bus_dispatch() */
           if (!bus_dispatch_matches (transaction,
                                      entry->connection,
                                      addressed_recipient,
-                                     entry->activation_message, error))
-            goto error;
+                                     entry->activation_message, &error))
+            {
+              /* If permission is denied, we just want to return the error
+               * to the original method invoker; in particular, we don't
+               * want to make the RequestName call fail with that error
+               * (see fd.o #78979, CVE-2014-3477). */
+              if (!bus_transaction_send_error_reply (transaction, entry->connection,
+                                                     &error, entry->activation_message))
+                {
+                  bus_connection_send_oom_error (entry->connection,
+                                                 entry->activation_message);
+                }
+
+              link = next;
+              continue;
+            }
         }
 
       link = next;
@@ -1203,7 +1234,6 @@ bus_activation_send_pending_auto_activation_messages (BusActivation  *activation
   if (!add_restore_pending_to_transaction (transaction, pending_activation))
     {
       _dbus_verbose ("Could not add cancel hook to transaction to revert removing pending activation\n");
-      BUS_SET_OOM (error);
       goto error;
     }
 
@@ -1214,6 +1244,21 @@ bus_activation_send_pending_auto_activation_messages (BusActivation  *activation
  error:
   return FALSE;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+dbus_bool_t
+remove_pending_activation(BusActivation  *activation,
+                          const char     *name)
+{
+  BusPendingActivation *pending_activation;
+
+  pending_activation = _dbus_hash_table_lookup_string (activation->pending_activations, name);
+  if(pending_activation == NULL)
+    return FALSE;
+
+  return _dbus_hash_table_remove_string (activation->pending_activations, name);
+}
+#endif
 
 /**
  * FIXME @todo the error messages here would ideally be preallocated
@@ -1275,6 +1320,11 @@ pending_activation_failed (BusPendingActivation *pending_activation,
   while (!try_send_activation_failure (pending_activation, how))
     _dbus_wait_for_memory ();
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  drop_message(bus_connections_find_activator_by_name(bus_context_get_connections(pending_activation->activation->context), pending_activation->service_name));
+  enable_activator_watch(bus_context_get_connections(pending_activation->activation->context), pending_activation->service_name);
+#endif
+
   /* Destroy this pending activation */
   _dbus_hash_table_remove_string (pending_activation->activation->pending_activations,
                                   pending_activation->service_name);
@@ -1289,6 +1339,10 @@ handle_servicehelper_exit_error (int        exit_code,
 {
   switch (exit_code)
     {
+    case BUS_SPAWN_EXIT_CODE_CONFIG_INVALID:
+      dbus_set_error (error, DBUS_ERROR_SPAWN_CONFIG_INVALID,
+		      "Invalid configuration (missing or empty <user>?)");
+      break;
     case BUS_SPAWN_EXIT_CODE_NO_MEMORY:
       dbus_set_error (error, DBUS_ERROR_NO_MEMORY,
                       "Launcher could not run (out of memory)");
@@ -1325,6 +1379,7 @@ handle_servicehelper_exit_error (int        exit_code,
       dbus_set_error (error, DBUS_ERROR_SPAWN_CHILD_SIGNALED,
                       "Launched child was signaled, it probably crashed");
       break;
+    case BUS_SPAWN_EXIT_CODE_GENERIC_FAILURE:
     default:
       dbus_set_error (error, DBUS_ERROR_SPAWN_CHILD_EXITED,
                       "Launch helper exited with unknown return code %i", exit_code);
@@ -1670,6 +1725,31 @@ out:
   return retval;
 }
 
+static void
+child_setup (void *user_data)
+{
+#ifdef DBUS_UNIX
+  BusActivation *activation = user_data;
+  DBusRLimit *initial_fd_limit;
+  DBusError error;
+
+  dbus_error_init (&error);
+  initial_fd_limit = bus_context_get_initial_fd_limit (activation->context);
+
+  if (initial_fd_limit != NULL &&
+      !_dbus_rlimit_restore_fd_limit (initial_fd_limit, &error))
+    {
+      /* unfortunately we don't actually know the service name here */
+      bus_context_log (activation->context,
+                       DBUS_SYSTEM_LOG_INFO,
+                       "Failed to reset fd limit before activating "
+                       "service: %s: %s",
+                       error.name, error.message);
+    }
+#endif
+}
+
+
 dbus_bool_t
 bus_activation_activate_service (BusActivation  *activation,
                                  DBusConnection *connection,
@@ -1714,44 +1794,73 @@ bus_activation_activate_service (BusActivation  *activation,
   if (!auto_activation)
     {
       /* Check if the service is active */
-      _dbus_string_init_const (&service_str, service_name);
-      if (bus_registry_lookup (bus_context_get_registry (activation->context), &service_str) != NULL)
+#ifdef ENABLE_KDBUS_TRANSPORT
+      if(!bus_context_is_kdbus(bus_transaction_get_context (transaction))) //non-kdbus bus is used
         {
-          dbus_uint32_t result;
-
-          _dbus_verbose ("Service \"%s\" is already active\n", service_name);
-
-          message = dbus_message_new_method_return (activation_message);
-
-          if (!message)
+#endif
+          _dbus_string_init_const (&service_str, service_name);
+          if (bus_registry_lookup (bus_context_get_registry (activation->context), &service_str) != NULL)
             {
-              _dbus_verbose ("No memory to create reply to activate message\n");
-              BUS_SET_OOM (error);
-              return FALSE;
-            }
+              dbus_uint32_t result;
 
-          result = DBUS_START_REPLY_ALREADY_RUNNING;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  send_service_exists:
+#endif
+              _dbus_verbose ("Service \"%s\" is already active\n", service_name);
 
-          if (!dbus_message_append_args (message,
-                                         DBUS_TYPE_UINT32, &result,
-                                         DBUS_TYPE_INVALID))
-            {
-              _dbus_verbose ("No memory to set args of reply to activate message\n");
-              BUS_SET_OOM (error);
+              message = dbus_message_new_method_return (activation_message);
+
+              if (!message)
+                {
+                  _dbus_verbose ("No memory to create reply to activate message\n");
+                  BUS_SET_OOM (error);
+                  return FALSE;
+                }
+
+              result = DBUS_START_REPLY_ALREADY_RUNNING;
+
+              if (!dbus_message_append_args (message,
+                                             DBUS_TYPE_UINT32, &result,
+                                             DBUS_TYPE_INVALID))
+                {
+                  _dbus_verbose ("No memory to set args of reply to activate message\n");
+                  BUS_SET_OOM (error);
+                  dbus_message_unref (message);
+                  return FALSE;
+                }
+
+              retval = bus_transaction_send_from_driver (transaction, connection, message);
               dbus_message_unref (message);
+              if (!retval)
+                {
+                  _dbus_verbose ("Failed to send reply\n");
+                  BUS_SET_OOM (error);
+                }
+
+              return retval;
+            }
+#ifdef ENABLE_KDBUS_TRANSPORT
+        }
+      else  //kdbus bus is used
+        {
+          int inter_ret;
+          struct nameInfo info;
+
+          inter_ret = kdbus_NameQuery(service_name, dbus_connection_get_transport(connection), &info);
+          if(inter_ret == 0)
+            {
+              free(info.sec_label);
+              if (!(info.flags & KDBUS_HELLO_ACTIVATOR))
+                goto send_service_exists;
+            }
+          else if (inter_ret != -ESRCH)
+            {
+              _dbus_verbose("kdbus error checking if name exists: err %d (%m)\n", errno);
+              dbus_set_error (error, DBUS_ERROR_FAILED, "Could not determine whether name '%s' exists", service_name);
               return FALSE;
             }
-
-          retval = bus_transaction_send_from_driver (transaction, connection, message);
-          dbus_message_unref (message);
-          if (!retval)
-            {
-              _dbus_verbose ("Failed to send reply\n");
-              BUS_SET_OOM (error);
-            }
-
-          return retval;
         }
+#endif
     }
 
   pending_activation_entry = dbus_new0 (BusPendingActivationEntry, 1);
@@ -1964,6 +2073,32 @@ bus_activation_activate_service (BusActivation  *activation,
           _dbus_string_init_const (&service_string, "org.freedesktop.systemd1");
           service = bus_registry_lookup (registry, &service_string);
 
+          /* Following the general principle of "log early and often",
+           * we capture that we *want* to send the activation message, even if
+           * systemd is not actually there to receive it yet */
+          if (!bus_transaction_capture (activation_transaction,
+                NULL, message))
+            {
+              dbus_message_unref (message);
+              BUS_SET_OOM (error);
+              return FALSE;
+            }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+	  if (strcmp (bus_context_get_type (activation->context), "system") != 0)
+	    {
+              bus_context_log (activation->context,
+                               DBUS_SYSTEM_LOG_INFO, "Activation via systemd possible only on system bus in kdbus-enabled Tizen 2.4 (type: %s)",
+			       bus_context_get_type (activation->context));
+	      dbus_message_unref (message);
+	      return FALSE;
+	    }
+           bus_context_log (activation->context,
+                               DBUS_SYSTEM_LOG_INFO, "Activating via systemd: service name='%s' unit='%s'",
+                               service_name,
+                               entry->systemd_service);
+	  retval = dbus_connection_send (connection, message, NULL);
+#else
           if (service != NULL)
             {
               bus_context_log (activation->context,
@@ -1984,6 +2119,7 @@ bus_activation_activate_service (BusActivation  *activation,
               retval = bus_activation_activate_service (activation, NULL, activation_transaction, TRUE,
                                                         message, "org.freedesktop.systemd1", error);
             }
+#endif
 
           dbus_message_unref (message);
 
@@ -2099,9 +2235,12 @@ bus_activation_activate_service (BusActivation  *activation,
 
   dbus_error_init (&tmp_error);
 
-  if (!_dbus_spawn_async_with_babysitter (&pending_activation->babysitter, argv,
+  if (!_dbus_spawn_async_with_babysitter (&pending_activation->babysitter,
+                                          service_name,
+                                          argv,
                                           envp,
-                                          NULL, activation,
+                                          child_setup,
+                                          activation,
                                           &tmp_error))
     {
       _dbus_verbose ("Failed to spawn child\n");
@@ -2179,7 +2318,7 @@ bus_activation_list_services (BusActivation *activation,
 
  error:
   for (j = 0; j < i; j++)
-    dbus_free (retval[i]);
+    dbus_free (retval[j]);
   dbus_free (retval);
 
   return FALSE;
@@ -2232,7 +2371,7 @@ dbus_activation_systemd_failure (BusActivation *activation,
   return TRUE;
 }
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 
 #include <stdio.h>
 
@@ -2539,11 +2678,17 @@ dbus_bool_t
 bus_activation_service_reload_test (const DBusString *test_data_dir)
 {
   DBusString directory;
+  const char *tmp;
 
   if (!_dbus_string_init (&directory))
     return FALSE;
 
-  if (!_dbus_string_append (&directory, _dbus_get_tmpdir()))
+  tmp = _dbus_get_tmpdir ();
+
+  if (tmp == NULL)
+    return FALSE;
+
+  if (!_dbus_string_append (&directory, tmp))
     return FALSE;
 
   if (!_dbus_string_append (&directory, "/dbus-reload-test-") ||
@@ -2579,4 +2724,4 @@ bus_activation_service_reload_test (const DBusString *test_data_dir)
   return TRUE;
 }
 
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */

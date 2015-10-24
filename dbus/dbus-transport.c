@@ -2,6 +2,7 @@
 /* dbus-transport.c DBusTransport object (internal to D-Bus implementation)
  *
  * Copyright (C) 2002, 2003  Red Hat Inc.
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  * 
@@ -32,7 +33,11 @@
 #include "dbus-credentials.h"
 #include "dbus-mainloop.h"
 #include "dbus-message.h"
-#ifdef DBUS_BUILD_TESTS
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "dbus-transport-kdbus.h"
+#endif
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 #include "dbus-server-debug-pipe.h"
 #endif
 
@@ -107,7 +112,7 @@ _dbus_transport_init_base (DBusTransport             *transport,
   DBusMessageLoader *loader;
   DBusAuth *auth;
   DBusCounter *counter;
-  char *address_copy;
+  char *address_copy = NULL;
   DBusCredentials *creds;
   
   loader = _dbus_message_loader_new ();
@@ -117,10 +122,28 @@ _dbus_transport_init_base (DBusTransport             *transport,
   if (server_guid)
     auth = _dbus_auth_server_new (server_guid);
   else
-    auth = _dbus_auth_client_new ();
+  {
+	  _dbus_assert (address != NULL);
+	  if (!_dbus_string_copy_data (address, &address_copy))
+        {
+          _dbus_message_loader_unref (loader);
+          return FALSE;
+        }
+#ifdef ENABLE_KDBUS_TRANSPORT
+      if(address_copy == strstr(address_copy, "kernel:path=")) //FIXME -> path doesn't have to be first key in address
+	  auth = _dbus_auth_client_new_kdbus();
+	  else
+#endif
+		  auth = _dbus_auth_client_new ();
+  }
+
   if (auth == NULL)
     {
       _dbus_message_loader_unref (loader);
+
+      if (address_copy != NULL)
+        dbus_free(address_copy);
+
       return FALSE;
     }
 
@@ -129,6 +152,10 @@ _dbus_transport_init_base (DBusTransport             *transport,
     {
       _dbus_auth_unref (auth);
       _dbus_message_loader_unref (loader);
+
+      if (address_copy != NULL)
+        dbus_free(address_copy);
+
       return FALSE;
     }  
 
@@ -138,6 +165,10 @@ _dbus_transport_init_base (DBusTransport             *transport,
       _dbus_counter_unref (counter);
       _dbus_auth_unref (auth);
       _dbus_message_loader_unref (loader);
+
+      if (address_copy != NULL)
+        dbus_free(address_copy);
+
       return FALSE;
     }
   
@@ -145,19 +176,6 @@ _dbus_transport_init_base (DBusTransport             *transport,
     {
       _dbus_assert (address == NULL);
       address_copy = NULL;
-    }
-  else
-    {
-      _dbus_assert (address != NULL);
-
-      if (!_dbus_string_copy_data (address, &address_copy))
-        {
-          _dbus_credentials_unref (creds);
-          _dbus_counter_unref (counter);
-          _dbus_auth_unref (auth);
-          _dbus_message_loader_unref (loader);
-          return FALSE;
-        }
     }
   
   transport->refcount = 1;
@@ -242,6 +260,7 @@ _dbus_transport_finalize_base (DBusTransport *transport)
  * opened DBusTransport object. If it isn't, returns #NULL
  * and sets @p error.
  *
+ * @param address the address to be checked.
  * @param error address where an error can be returned.
  * @returns a new transport, or #NULL on failure.
  */
@@ -272,6 +291,7 @@ check_address (const char *address, DBusError *error)
  * Creates a new transport for the "autostart" method.
  * This creates a client-side of a transport.
  *
+ * @param scope scope of autolaunch (Windows only)
  * @param error address where an error can be returned.
  * @returns a new transport, or #NULL on failure.
  */
@@ -345,10 +365,13 @@ static const struct {
                                     DBusTransport   **transport_p,
                                     DBusError        *error);
 } open_funcs[] = {
+#ifdef ENABLE_KDBUS_TRANSPORT
+  { _dbus_transport_open_kdbus },
+#endif
   { _dbus_transport_open_socket },
   { _dbus_transport_open_platform_specific },
   { _dbus_transport_open_autolaunch }
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
   , { _dbus_transport_open_debug_pipe }
 #endif
 };
@@ -684,10 +707,33 @@ auth_via_default_rules (DBusTransport *transport)
   return allow;
 }
 
+/**
+ * Returns #TRUE if we have been authenticated. It will return #TRUE even if
+ * the transport is now disconnected, but was ever authenticated before
+ * disconnecting.
+ *
+ * This replaces the older _dbus_transport_get_is_authenticated() which
+ * had side-effects.
+ *
+ * @param transport the transport
+ * @returns whether we're authenticated
+ */
+dbus_bool_t
+_dbus_transport_peek_is_authenticated (DBusTransport *transport)
+{
+  return transport->authenticated;
+}
 
 /**
- * Returns #TRUE if we have been authenticated.  Will return #TRUE
- * even if the transport is disconnected.
+ * Returns #TRUE if we have been authenticated. It will return #TRUE even if
+ * the transport is now disconnected, but was ever authenticated before
+ * disconnecting.
+ *
+ * If we have not finished authenticating, but we have enough buffered input
+ * to finish the job, then this function will do so before it returns.
+ *
+ * This used to be called _dbus_transport_get_is_authenticated(), but that
+ * name seems inappropriate for a function with side-effects.
  *
  * @todo we drop connection->mutex when calling the unix_user_function,
  * and windows_user_function, which may not be safe really.
@@ -696,7 +742,7 @@ auth_via_default_rules (DBusTransport *transport)
  * @returns whether we're authenticated
  */
 dbus_bool_t
-_dbus_transport_get_is_authenticated (DBusTransport *transport)
+_dbus_transport_try_to_authenticate (DBusTransport *transport)
 {  
   if (transport->authenticated)
     return TRUE;
@@ -1020,9 +1066,7 @@ recover_unused_bytes (DBusTransport *transport)
                      orig_len);
       
       _dbus_message_loader_return_buffer (transport->loader,
-                                          buffer,
-                                          _dbus_string_get_length (buffer) -
-                                          orig_len);
+                                          buffer);
 
       _dbus_auth_delete_unused_bytes (transport->auth);
       
@@ -1052,9 +1096,7 @@ recover_unused_bytes (DBusTransport *transport)
                      orig_len);
       
       _dbus_message_loader_return_buffer (transport->loader,
-                                          buffer,
-                                          _dbus_string_get_length (buffer) -
-                                          orig_len);
+                                          buffer);
 
       if (succeeded)
         _dbus_auth_delete_unused_bytes (transport->auth);
@@ -1083,12 +1125,12 @@ _dbus_transport_get_dispatch_status (DBusTransport *transport)
       _dbus_counter_get_unix_fd_value (transport->live_messages) >= transport->max_live_messages_unix_fds)
     return DBUS_DISPATCH_COMPLETE; /* complete for now */
 
-  if (!_dbus_transport_get_is_authenticated (transport))
+  if (!_dbus_transport_try_to_authenticate (transport))
     {
       if (_dbus_auth_do_work (transport->auth) ==
           DBUS_AUTH_STATE_WAITING_FOR_MEMORY)
         return DBUS_DISPATCH_NEED_MEMORY;
-      else if (!_dbus_transport_get_is_authenticated (transport))
+      else if (!_dbus_transport_try_to_authenticate (transport))
         return DBUS_DISPATCH_COMPLETE;
     }
 
@@ -1106,6 +1148,71 @@ _dbus_transport_get_dispatch_status (DBusTransport *transport)
   else
     return DBUS_DISPATCH_COMPLETE;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+#ifdef MATCH_IN_LIB
+/**
+ * Checks if incoming message is false positive broadcast.
+ * When registering for broadcasts using AddMatch, we build
+ * register of match-rules. It's a double check because
+ * Kdbus Bloom mechanism can pass broadcast even though we
+ * didn't sign up for it.
+ *
+ * @returns TRUE if we are expecting this broadcast
+ */
+static dbus_bool_t
+should_receive_message(DBusTransport *transport, DBusMessage *message)
+{
+  DBusList **rules[4] = { NULL };
+  Matchmaker *matchmaker;
+  const char *interface;
+  int type;
+  DBusList *rule_link;
+  int i;
+
+  _dbus_verbose("Broadcast from kdbus -> start maching rules\n");
+
+  matchmaker = dbus_transport_get_matchmaker(transport);
+  interface = dbus_message_get_interface(message);
+  type = dbus_message_get_type(message);
+
+  rules[0] = matchmaker_get_rules (matchmaker, DBUS_MESSAGE_TYPE_INVALID, NULL, FALSE); //neighter
+  rules[1] = matchmaker_get_rules (matchmaker, DBUS_MESSAGE_TYPE_INVALID, interface, FALSE); //just_iface
+  rules[2] = matchmaker_get_rules (matchmaker, type, NULL, FALSE); //just_type
+  rules[3] = matchmaker_get_rules (matchmaker, type, interface, FALSE); //both
+
+  for (i = 0; i < _DBUS_N_ELEMENTS(rules); i++)
+    {
+      if (rules[i] != NULL)
+        {
+        rule_link = _dbus_list_get_first_link (rules[i]);
+          while (rule_link != NULL)
+            {
+              MatchRule *rule;
+              rule = rule_link->data;
+#ifdef DBUS_ENABLE_VERBOSE_MODE
+                {
+                  char *s = match_rule_to_string (rule);
+                  _dbus_verbose ("Checking whether message matches rule %s \n", s);
+                  dbus_free (s);
+                }
+#endif
+              if (match_rule_matches(transport, rule, message, MATCH_MESSAGE_TYPE | MATCH_INTERFACE) == TRUE)
+                {
+                  _dbus_verbose("Rule match\n");
+                  return TRUE;
+                }
+              rule_link = _dbus_list_get_next_link (rules[i], rule_link);
+            }
+        }
+    }
+
+  _dbus_verbose("\n\nNo matching rules - false positive bloom filtering. Removing message from received\n\n");
+
+  return FALSE;
+}
+#endif
+#endif
 
 /**
  * Processes data we've read while handling a watch, potentially
@@ -1134,7 +1241,38 @@ _dbus_transport_queue_messages (DBusTransport *transport)
       _dbus_assert (link != NULL);
       
       message = link->data;
+#ifdef ENABLE_KDBUS_TRANSPORT
+#ifdef MATCH_IN_LIB
+      if(dbus_message_get_destination(message) == NULL && dbus_message_get_type (message) != DBUS_MESSAGE_TYPE_ERROR) //todo condition should be different for eavesdropping
+        {
+          if (transport->address && !strncmp(transport->address, "kernel:", strlen("kernel:")))	//TODO find better way to check if kdbus transport
+            {
+              if(should_receive_message(transport, message) == FALSE)
+              {
+                /* discard message and exit */
+                dbus_message_unref (message);
+                _dbus_list_free_link (link);
+                return TRUE;
+              }
       
+            }
+        }
+#endif
+#if defined(POLICY_IN_LIB) && !defined(REMOVE_POLICY_FROM_DAEMON)
+      if (transport->address && !strncmp(transport->address, "kernel:", strlen("kernel:"))) //TODO same as in MATCH_IN_LIB above ;)
+        {
+          if (!policy_check_can_recv(dbus_transport_get_policy(transport), message))
+            {
+              send_cant_recv_error(transport, message);
+              /*ignore if send fail - user did not know about sending anyway*/
+              /* discard message and exit */
+              dbus_message_unref(message);
+              _dbus_list_free_link(link);
+              return TRUE;
+            }
+        }
+#endif
+#endif
       _dbus_verbose ("queueing received message %p\n", message);
 
       if (!_dbus_message_add_counter (message, transport->live_messages))
@@ -1337,7 +1475,7 @@ _dbus_transport_get_unix_process_id (DBusTransport *transport,
   if (_dbus_credentials_include (auth_identity,
                                  DBUS_CREDENTIAL_UNIX_PROCESS_ID))
     {
-      *pid = _dbus_credentials_get_unix_pid (auth_identity);
+      *pid = _dbus_credentials_get_pid (auth_identity);
       return TRUE;
     }
   else
@@ -1489,6 +1627,33 @@ _dbus_transport_set_allow_anonymous (DBusTransport              *transport,
                                      dbus_bool_t                 value)
 {
   transport->allow_anonymous = value != FALSE;
+}
+
+/**
+ * Return how many file descriptors are pending in the loader
+ *
+ * @param transport the transport
+ */
+int
+_dbus_transport_get_pending_fds_count (DBusTransport *transport)
+{
+  return _dbus_message_loader_get_pending_fds_count (transport->loader);
+}
+
+/**
+ * Register a function to be called whenever the number of pending file
+ * descriptors in the loader change.
+ *
+ * @param transport the transport
+ * @param callback the callback
+ */
+void
+_dbus_transport_set_pending_fds_function (DBusTransport *transport,
+                                           void (* callback) (void *),
+                                           void *data)
+{
+  _dbus_message_loader_set_pending_fds_function (transport->loader,
+                                                 callback, data);
 }
 
 #ifdef DBUS_ENABLE_STATS

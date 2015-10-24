@@ -27,6 +27,7 @@
 #include "utils.h"
 #include <dbus/dbus-marshal-validate.h>
 
+#ifndef ENABLE_KDBUS_TRANSPORT
 struct BusMatchRule
 {
   int refcount;       /**< reference count */
@@ -49,6 +50,7 @@ struct BusMatchRule
 
 #define BUS_MATCH_ARG_NAMESPACE   0x4000000u
 #define BUS_MATCH_ARG_IS_PATH  0x8000000u
+#endif
 
 #define BUS_MATCH_ARG_FLAGS (BUS_MATCH_ARG_NAMESPACE | BUS_MATCH_ARG_IS_PATH)
 
@@ -64,7 +66,7 @@ bus_match_rule_new (DBusConnection *matches_go_to)
   rule->refcount = 1;
   rule->matches_go_to = matches_go_to;
 
-#ifndef DBUS_BUILD_TESTS
+#ifndef DBUS_ENABLE_EMBEDDED_TESTS
   _dbus_assert (rule->matches_go_to != NULL);
 #endif
   
@@ -485,6 +487,20 @@ bus_match_rule_set_arg (BusMatchRule     *rule,
 
   return TRUE;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+void
+bus_match_rule_set_cookie (BusMatchRule *rule, __u64 cookie)
+{
+  rule->kdbus_cookie = cookie;
+}
+
+__u64
+bus_match_rule_get_cookie (BusMatchRule *rule)
+{
+  return rule->kdbus_cookie;
+}
+#endif
 
 #define ISWHITE(c) (((c) == ' ') || ((c) == '\t') || ((c) == '\n') || ((c) == '\r'))
 
@@ -1366,8 +1382,10 @@ bus_matchmaker_add_rule (BusMatchmaker   *matchmaker,
   
   return TRUE;
 }
-
-static dbus_bool_t
+#ifndef ENABLE_KDBUS_TRANSPORT
+static
+#endif
+dbus_bool_t
 match_rule_equal (BusMatchRule *a,
                   BusMatchRule *b)
 {
@@ -1836,8 +1854,11 @@ match_rule_matches (BusMatchRule    *rule,
        * namespace, rather than just starting with that string,
        * by checking that the matched prefix is followed by a '/'
        * or the end of the path.
+       *
+       * Special case: the only valid path of length 1, "/",
+       * matches everything.
        */
-      if (path[len] != '\0' && path[len] != '/')
+      if (len > 1 && path[len] != '\0' && path[len] != '/')
         return FALSE;
     }
 
@@ -1980,12 +2001,10 @@ get_recipients_from_list (DBusList       **rules,
               if (!_dbus_list_append (recipients_p, rule->matches_go_to))
                 return FALSE;
             }
-#ifdef DBUS_ENABLE_VERBOSE_MODE
           else
             {
               _dbus_verbose ("Connection already receiving this message, so not adding again\n");
             }
-#endif /* DBUS_ENABLE_VERBOSE_MODE */
         }
 
       link = _dbus_list_get_next_link (rules, link);
@@ -2056,7 +2075,7 @@ bus_matchmaker_get_recipients (BusMatchmaker   *matchmaker,
   return TRUE;
 }
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 #include "test.h"
 #include <stdlib.h>
 
@@ -2719,6 +2738,7 @@ test_path_matching (void)
 
 static const char*
 path_namespace_should_match_message_1[] = {
+  "type='signal',path_namespace='/'",
   "type='signal',path_namespace='/foo'",
   "type='signal',path_namespace='/foo/TheObjectManager'",
   NULL
@@ -2733,6 +2753,7 @@ path_namespace_should_not_match_message_1[] = {
 
 static const char*
 path_namespace_should_match_message_2[] = {
+  "type='signal',path_namespace='/'",
   "type='signal',path_namespace='/foo/TheObjectManager'",
   NULL
 };
@@ -2744,11 +2765,24 @@ path_namespace_should_not_match_message_2[] = {
 
 static const char*
 path_namespace_should_match_message_3[] = {
+  "type='signal',path_namespace='/'",
   NULL
 };
 
 static const char*
 path_namespace_should_not_match_message_3[] = {
+  "type='signal',path_namespace='/foo/TheObjectManager'",
+  NULL
+};
+
+static const char*
+path_namespace_should_match_message_4[] = {
+  "type='signal',path_namespace='/'",
+  NULL
+};
+
+static const char*
+path_namespace_should_not_match_message_4[] = {
   "type='signal',path_namespace='/foo/TheObjectManager'",
   NULL
 };
@@ -2759,6 +2793,7 @@ test_matching_path_namespace (void)
   DBusMessage *message1;
   DBusMessage *message2;
   DBusMessage *message3;
+  DBusMessage *message4;
 
   message1 = dbus_message_new (DBUS_MESSAGE_TYPE_SIGNAL);
   _dbus_assert (message1 != NULL);
@@ -2775,6 +2810,11 @@ test_matching_path_namespace (void)
   if (!dbus_message_set_path (message3, "/foo/TheObjectManagerOther"))
     _dbus_assert_not_reached ("oom");
 
+  message4 = dbus_message_new (DBUS_MESSAGE_TYPE_SIGNAL);
+  _dbus_assert (message4 != NULL);
+  if (!dbus_message_set_path (message4, "/"))
+    _dbus_assert_not_reached ("oom");
+
   check_matching (message1, 1,
                   path_namespace_should_match_message_1,
                   path_namespace_should_not_match_message_1);
@@ -2784,7 +2824,11 @@ test_matching_path_namespace (void)
   check_matching (message3, 3,
                   path_namespace_should_match_message_3,
                   path_namespace_should_not_match_message_3);
+  check_matching (message4, 4,
+                  path_namespace_should_match_message_4,
+                  path_namespace_should_not_match_message_4);
 
+  dbus_message_unref (message4);
   dbus_message_unref (message3);
   dbus_message_unref (message2);
   dbus_message_unref (message1);
@@ -2811,5 +2855,5 @@ bus_signals_test (const DBusString *test_data_dir)
   return TRUE;
 }
 
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */
 

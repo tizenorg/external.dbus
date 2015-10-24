@@ -79,26 +79,19 @@ struct DBusPendingCall
   unsigned int timeout_added : 1;                 /**< Have added the timeout */
 };
 
-#ifdef DBUS_ENABLE_VERBOSE_MODE
 static void
 _dbus_pending_call_trace_ref (DBusPendingCall *pending_call,
     int old_refcount,
     int new_refcount,
     const char *why)
 {
+#ifdef DBUS_ENABLE_VERBOSE_MODE
   static int enabled = -1;
 
   _dbus_trace_ref ("DBusPendingCall", pending_call, old_refcount,
       new_refcount, why, "DBUS_PENDING_CALL_TRACE", &enabled);
-}
-#else
-#define _dbus_pending_call_trace_ref(p, o, n, w) \
-  do \
-  {\
-    (void) (o); \
-    (void) (n); \
-  } while (0)
 #endif
+}
 
 static dbus_int32_t notify_user_data_slot = -1;
 
@@ -181,7 +174,19 @@ _dbus_pending_call_set_reply_unlocked (DBusPendingCall *pending,
 {
   if (message == NULL)
     {
+	  const char *dest, *path;
       message = pending->timeout_link->data;
+
+	  dest = dbus_message_get_destination (message);
+	  path = dbus_message_get_path(message);
+
+	  if (!dest)
+		dest = "none";
+	  if (!path)
+		path = "none";
+	  printf("libdbus:Timeout Detected : sender(blocked)=%s, dest(caller pid)=%d, path=%s\n",
+					dest, _dbus_getpid(), path);
+
       _dbus_list_clear (&pending->timeout_link);
     }
   else
@@ -425,6 +430,11 @@ _dbus_pending_call_last_unref (DBusPendingCall *pending)
   /* this assumes we aren't holding connection lock... */
   _dbus_data_slot_list_free (&pending->slot_list);
 
+  /*
+   * For prevent connection free at the _dbus_timeout_list_remove_timeout (SWC)
+   */
+  CONNECTION_LOCK(connection);
+
   if (pending->timeout != NULL)
     _dbus_timeout_unref (pending->timeout);
       
@@ -444,6 +454,11 @@ _dbus_pending_call_last_unref (DBusPendingCall *pending)
   dbus_free (pending);
 
   dbus_pending_call_free_data_slot (&notify_user_data_slot);
+
+  /*
+   * For prevent connection free at the _dbus_timeout_list_remove_timeout (SWC)
+   */
+  CONNECTION_UNLOCK(connection);
 
   /* connection lock should not be held. */
   /* Free the connection last to avoid a weird state while
@@ -489,8 +504,8 @@ _dbus_pending_call_get_completed_unlocked (DBusPendingCall    *pending)
   return pending->completed;
 }
 
-static DBusDataSlotAllocator slot_allocator;
-_DBUS_DEFINE_GLOBAL_LOCK (pending_call_slots);
+static DBusDataSlotAllocator slot_allocator =
+  _DBUS_DATA_SLOT_ALLOCATOR_INIT (_DBUS_LOCK_NAME (pending_call_slots));
 
 /**
  * Stores a pointer on a #DBusPendingCall, along
@@ -768,7 +783,6 @@ dbus_pending_call_allocate_data_slot (dbus_int32_t *slot_p)
   _dbus_return_val_if_fail (slot_p != NULL, FALSE);
 
   return _dbus_data_slot_allocator_alloc (&slot_allocator,
-                                          &_DBUS_LOCK_NAME (pending_call_slots),
                                           slot_p);
 }
 

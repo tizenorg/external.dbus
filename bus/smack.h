@@ -35,8 +35,14 @@ char *bus_smack_get_label (DBusConnection *connection, DBusError *error);
 
 void bus_smack_label_free (char *label);
 
+dbus_bool_t bus_smack_handle_get_connection_context (DBusConnection *connection,
+                                         BusTransaction *transaction,
+                                         DBusMessage    *message,
+                                         DBusError      *error);
+
 dbus_bool_t bus_smack_generate_allowed_list (DBusConnection *connection,
                                              DBusHashTable *label_rules,
+                                             dbus_pid_t pid,
                                              DBusList **error);
 
 #endif // SMACK_H

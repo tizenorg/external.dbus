@@ -20,6 +20,9 @@
  */
 
 #include <config.h>
+
+#include "dbus/dbus-internals.h"        /* just for the macros */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,8 +37,16 @@
 #include <time.h>
 
 #include "dbus-print-message.h"
+#include "tool-common.h"
 
 #define EAVESDROPPING_RULE "eavesdrop=true"
+
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+
+/* http://www.tcpdump.org/linktypes.html */
+#define LINKTYPE_DBUS 231
 
 #ifdef DBUS_WIN
 
@@ -78,13 +89,6 @@ gettimeofday (struct timeval *__p,
 }
 #endif
 
-inline static void
-oom (const char *doing)
-{
-  fprintf (stderr, "OOM while %s\n", doing);
-  exit (1);
-}
-
 static DBusHandlerResult
 monitor_filter_func (DBusConnection     *connection,
 		     DBusMessage        *message,
@@ -96,16 +100,18 @@ monitor_filter_func (DBusConnection     *connection,
                               DBUS_INTERFACE_LOCAL,
                               "Disconnected"))
     exit (0);
-  
-  /* Conceptually we want this to be
-   * DBUS_HANDLER_RESULT_NOT_YET_HANDLED, but this raises
-   * some problems.  See bug 1719.
+
+  /* Monitors must not allow libdbus to reply to messages, so we eat
+   * the message. See bug 1719.
    */
   return DBUS_HANDLER_RESULT_HANDLED;
 }
 
 #ifdef __APPLE__
 #define PROFILE_TIMED_FORMAT "%s\t%lu\t%d"
+#elif defined(__NetBSD__)
+#include <inttypes.h>
+#define PROFILE_TIMED_FORMAT "%s\t%" PRId64 "\t%d"
 #else
 #define PROFILE_TIMED_FORMAT "%s\t%lu\t%lu"
 #endif
@@ -217,10 +223,85 @@ profile_filter_func (DBusConnection	*connection,
   return DBUS_HANDLER_RESULT_HANDLED;
 }
 
+typedef enum {
+    BINARY_MODE_NOT,
+    BINARY_MODE_RAW,
+    BINARY_MODE_PCAP
+} BinaryMode;
+
+static DBusHandlerResult
+binary_filter_func (DBusConnection *connection,
+                    DBusMessage    *message,
+                    void           *user_data)
+{
+  BinaryMode mode = _DBUS_POINTER_TO_INT (user_data);
+  char *blob;
+  int len;
+
+  /* It would be nice if we could do a zero-copy "peek" one day, but libdbus
+   * is so copy-happy that this isn't really a big deal.
+   */
+  if (!dbus_message_marshal (message, &blob, &len))
+    tool_oom ("retrieving message");
+
+  switch (mode)
+    {
+      case BINARY_MODE_PCAP:
+          {
+            struct timeval t = { 0, 0 };
+            /* seconds, microseconds, bytes captured (possibly truncated),
+             * original length.
+             * http://wiki.wireshark.org/Development/LibpcapFileFormat
+             */
+            dbus_uint32_t header[4] = { 0, 0, len, len };
+
+            /* If this gets padded then we'd need to write it out in pieces */
+            _DBUS_STATIC_ASSERT (sizeof (header) == 16);
+
+            if (_DBUS_UNLIKELY (gettimeofday (&t, NULL) < 0))
+              {
+                /* I'm fairly sure this can't actually happen */
+                perror ("dbus-monitor: gettimeofday");
+                exit (1);
+              }
+
+            header[0] = t.tv_sec;
+            header[1] = t.tv_usec;
+
+            if (!tool_write_all (STDOUT_FILENO, header, sizeof (header)))
+              {
+                perror ("dbus-monitor: write");
+                exit (1);
+              }
+          }
+        break;
+
+      case BINARY_MODE_RAW:
+      default:
+        /* nothing special, just the raw message stream */
+        break;
+    }
+
+  if (!tool_write_all (STDOUT_FILENO, blob, len))
+    {
+      perror ("dbus-monitor: write");
+      exit (1);
+    }
+
+  dbus_free (blob);
+
+  if (dbus_message_is_signal (message,
+                              DBUS_INTERFACE_LOCAL,
+                              "Disconnected"))
+    exit (0);
+
+  return DBUS_HANDLER_RESULT_HANDLED;
+}
+
 static void
 usage (char *name, int ecode)
 {
-  fprintf (stderr, "Usage: %s [--system | --session | --address ADDRESS] [--monitor | --profile ] [watch expressions]\n", name);
+  fprintf (stderr, "Usage: %s [--system | --session | --address ADDRESS] [--monitor | --profile | --pcap | --binary ] [watch expressions]\n", name);
   exit (ecode);
 }
 
@@ -239,6 +320,66 @@ only_one_type (dbus_bool_t *seen_bus_type,
     }
 }
 
+static dbus_bool_t
+become_monitor (DBusConnection *connection,
+    int numFilters,
+    const char * const *filters)
+{
+  DBusError error = DBUS_ERROR_INIT;
+  DBusMessage *m;
+  DBusMessage *r;
+  int i;
+  dbus_uint32_t zero = 0;
+  DBusMessageIter appender, array_appender;
+
+  m = dbus_message_new_method_call (DBUS_SERVICE_DBUS,
+      DBUS_PATH_DBUS, DBUS_INTERFACE_MONITORING, "BecomeMonitor");
+
+  if (m == NULL)
+    tool_oom ("becoming a monitor");
+
+  dbus_message_iter_init_append (m, &appender);
+
+  if (!dbus_message_iter_open_container (&appender, DBUS_TYPE_ARRAY, "s",
+        &array_appender))
+    tool_oom ("opening string array");
+
+  for (i = 0; i < numFilters; i++)
+    {
+      if (!dbus_message_iter_append_basic (&array_appender, DBUS_TYPE_STRING,
+            &filters[i]))
+        tool_oom ("adding filter to array");
+    }
+
+  if (!dbus_message_iter_close_container (&appender, &array_appender) ||
+      !dbus_message_iter_append_basic (&appender, DBUS_TYPE_UINT32, &zero))
+    tool_oom ("finishing arguments");
+
+  r = dbus_connection_send_with_reply_and_block (connection, m, -1, &error);
+
+  if (r != NULL)
+    {
+      dbus_message_unref (r);
+    }
+  else if (dbus_error_has_name (&error, DBUS_ERROR_UNKNOWN_INTERFACE))
+    {
+      fprintf (stderr, "dbus-monitor: unable to enable new-style monitoring, "
+          "your dbus-daemon is too old. Falling back to eavesdropping.\n");
+      dbus_error_free (&error);
+    }
+  else
+    {
+      fprintf (stderr, "dbus-monitor: unable to enable new-style monitoring: "
+          "%s: \"%s\". Falling back to eavesdropping.\n",
+          error.name, error.message);
+      dbus_error_free (&error);
+    }
+
+  dbus_message_unref (m);
+
+  return (r != NULL);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -248,7 +389,7 @@ main (int argc, char *argv[])
   DBusHandleMessageFunction filter_func = monitor_filter_func;
   char *address = NULL;
   dbus_bool_t seen_bus_type = FALSE;
-  
+  BinaryMode binary_mode = BINARY_MODE_NOT;
   int i = 0, j = 0, numFilters = 0;
   char **filters = NULL;
 
@@ -292,9 +433,25 @@ main (int argc, char *argv[])
       else if (!strcmp (arg, "--help"))
 	usage (argv[0], 0);
       else if (!strcmp (arg, "--monitor"))
-	filter_func = monitor_filter_func;
+        {
+          filter_func = monitor_filter_func;
+          binary_mode = BINARY_MODE_NOT;
+        }
       else if (!strcmp (arg, "--profile"))
-	filter_func = profile_filter_func;
+        {
+          filter_func = profile_filter_func;
+          binary_mode = BINARY_MODE_NOT;
+        }
+      else if (!strcmp (arg, "--binary"))
+        {
+          filter_func = binary_filter_func;
+          binary_mode = BINARY_MODE_RAW;
+        }
+      else if (!strcmp (arg, "--pcap"))
+        {
+          filter_func = binary_filter_func;
+          binary_mode = BINARY_MODE_PCAP;
+        }
       else if (!strcmp (arg, "--"))
 	continue;
       else if (arg[0] == '-')
@@ -309,10 +466,10 @@ main (int argc, char *argv[])
 
           filters = (char **) realloc (filters, numFilters * sizeof (char *));
           if (filters == NULL)
-            oom ("adding a new filter slot");
-          filters[j] = (char *) malloc (filter_len * sizeof (char *));
+            tool_oom ("adding a new filter slot");
+          filters[j] = (char *) malloc (filter_len);
           if (filters[j] == NULL)
-            oom ("adding a new filter");
+            tool_oom ("adding a new filter");
           snprintf (filters[j], filter_len, "%s,%s", EAVESDROPPING_RULE, arg);
           j++;
       }
@@ -322,7 +479,11 @@ main (int argc, char *argv[])
   
   if (address != NULL)
     {
+#ifdef ENABLE_KDBUS_TRANSPORT
+      connection = dbus_connection_open_monitor (address, &error);
+#else
       connection = dbus_connection_open (address, &error);
+#endif
       if (connection)
         {
           if (!dbus_bus_register (connection, &error))
@@ -362,49 +523,100 @@ main (int argc, char *argv[])
       exit (1);
     }
 
-  if (numFilters)
+  if (!dbus_connection_add_filter (connection, filter_func,
+                                   _DBUS_INT_TO_POINTER (binary_mode), NULL))
     {
+      fprintf (stderr, "Couldn't add filter!\n");
+      exit (1);
+    }
+
+  if (become_monitor (connection, numFilters,
+                      (const char * const *) filters))
+    {
+      /* no more preparation needed */
+    }
+  else if (numFilters)
+    {
+      size_t offset = 0;
       for (i = 0; i < j; i++)
         {
-          dbus_bus_add_match (connection, filters[i], &error);
-          if (dbus_error_is_set (&error))
+          dbus_bus_add_match (connection, filters[i] + offset, &error);
+          if (dbus_error_is_set (&error) && i == 0 && offset == 0)
+            {
+              /* We might be talking to a pre-1.5.6 dbus-daemon
+              * which wouldn't understand eavesdrop=true.
+              * If this works, carry on with offset > 0
+              * on the remaining iterations. */
+              offset = strlen (EAVESDROPPING_RULE) + 1;
+              dbus_error_free (&error);
+              dbus_bus_add_match (connection, filters[i] + offset, &error);
+            }
+
+	  if (dbus_error_is_set (&error))
             {
               fprintf (stderr, "Failed to setup match \"%s\": %s\n",
                        filters[i], error.message);
               dbus_error_free (&error);
               exit (1);
             }
-	  free(filters[i]);
+          free(filters[i]);
         }
     }
   else
     {
       dbus_bus_add_match (connection,
-		          EAVESDROPPING_RULE ",type='signal'",
-		          &error);
+                          EAVESDROPPING_RULE,
+                          &error);
       if (dbus_error_is_set (&error))
-        goto lose;
-      dbus_bus_add_match (connection,
-		          EAVESDROPPING_RULE ",type='method_call'",
-		          &error);
-      if (dbus_error_is_set (&error))
-        goto lose;
-      dbus_bus_add_match (connection,
-		          EAVESDROPPING_RULE ",type='method_return'",
-		          &error);
-      if (dbus_error_is_set (&error))
-        goto lose;
-      dbus_bus_add_match (connection,
-		          EAVESDROPPING_RULE ",type='error'",
-		          &error);
-      if (dbus_error_is_set (&error))
-        goto lose;
+        {
+          dbus_error_free (&error);
+          dbus_bus_add_match (connection,
+                              "",
+                              &error);
+          if (dbus_error_is_set (&error))
+            goto lose;
+        }
     }
 
-  if (!dbus_connection_add_filter (connection, filter_func, NULL, NULL)) {
-    fprintf (stderr, "Couldn't add filter!\n");
-    exit (1);
-  }
+  switch (binary_mode)
+    {
+      case BINARY_MODE_NOT:
+      case BINARY_MODE_RAW:
+        break;
+
+      case BINARY_MODE_PCAP:
+          {
+            /* We're not using libpcap because the file format is simple
+             * enough not to need it.
+             * http://wiki.wireshark.org/Development/LibpcapFileFormat */
+            struct {
+                dbus_uint32_t magic;
+                dbus_uint16_t major_version;
+                dbus_uint16_t minor_version;
+                dbus_int32_t timezone;
+                dbus_uint32_t precision;
+                dbus_uint32_t max_length;
+                dbus_uint32_t link_type;
+            } header = {
+                0xA1B2C3D4U,  /* magic number */
+                2, 4,         /* v2.4 */
+                0,            /* capture in GMT */
+                0,            /* no opinion on timestamp precision */
+                (1 << 27),    /* D-Bus spec says so */
+                LINKTYPE_DBUS
+            };
+
+            /* Assert that there is no padding */
+            _DBUS_STATIC_ASSERT (sizeof (header) == 24);
+
+            if (!tool_write_all (STDOUT_FILENO, &header, sizeof (header)))
+              {
+                perror ("dbus-monitor: write");
+                exit (1);
+              }
+          }
+        break;
+    }
 
   while (dbus_connection_read_write_dispatch(connection, -1))
     ;

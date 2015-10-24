@@ -169,9 +169,19 @@ typedef void (* DBusPendingCallNotifyFunction) (DBusPendingCall *pending,
 typedef DBusHandlerResult (* DBusHandleMessageFunction) (DBusConnection     *connection,
                                                          DBusMessage        *message,
                                                          void               *user_data);
+
+DBUS_EXPORT
+DBusMessage *	   generate_local_error_message 		(dbus_uint32_t               serial,
+								 char                       *error_name,
+								 char                       *error_msg);
 DBUS_EXPORT
 DBusConnection*    dbus_connection_open                         (const char                 *address,
                                                                  DBusError                  *error);
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBUS_EXPORT
+DBusConnection*    dbus_connection_open_monitor                 (const char                 *address,
+                                                                 DBusError                  *error);
+#endif
 DBUS_EXPORT
 DBusConnection*    dbus_connection_open_private                 (const char                 *address,
                                                                  DBusError                  *error);
@@ -185,6 +195,14 @@ DBUS_EXPORT
 dbus_bool_t        dbus_connection_get_is_connected             (DBusConnection             *connection);
 DBUS_EXPORT
 dbus_bool_t        dbus_connection_get_is_authenticated         (DBusConnection             *connection);
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBUS_EXPORT
+dbus_bool_t        dbus_connection_set_is_authenticated         (DBusConnection             *connection);
+DBUS_EXPORT
+dbus_bool_t        dbus_connection_is_kdbus                     (DBusConnection             *connection);
+DBUS_EXPORT
+dbus_bool_t        dbus_connection_is_monitor                   (DBusConnection             *connection);
+#endif
 DBUS_EXPORT
 dbus_bool_t        dbus_connection_get_is_anonymous             (DBusConnection             *connection);
 DBUS_EXPORT
@@ -212,6 +230,11 @@ void               dbus_connection_return_message               (DBusConnection 
 DBUS_EXPORT
 void               dbus_connection_steal_borrowed_message       (DBusConnection             *connection,
                                                                  DBusMessage                *message);
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBUS_EXPORT
+DBusMessage*       _dbus_connection_pop_message_unlocked        (DBusConnection             *connection);
+void                dbus_connection_clear_disconnect_message    (DBusConnection             *connection);
+#endif
 DBUS_EXPORT
 DBusMessage*       dbus_connection_pop_message                  (DBusConnection             *connection);
 DBUS_EXPORT
@@ -264,6 +287,16 @@ dbus_bool_t        dbus_connection_get_unix_user                (DBusConnection 
 DBUS_EXPORT
 dbus_bool_t        dbus_connection_get_unix_process_id          (DBusConnection             *connection,
                                                                  unsigned long              *pid);
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBUS_EXPORT
+dbus_bool_t        dbus_connection_get_unix_user_dbus           (DBusConnection             *connection,
+                                                                 unsigned long              *uid);
+DBUS_EXPORT
+dbus_bool_t        dbus_connection_get_unix_process_id_dbus     (DBusConnection             *connection,
+                                                                 unsigned long              *pid);
+DBUS_EXPORT
+int                dbus_connection_get_n_incoming               (DBusConnection             *connection);
+#endif
 DBUS_EXPORT
 dbus_bool_t        dbus_connection_get_adt_audit_session_data   (DBusConnection             *connection,
                                                                  void                      **data,
@@ -357,6 +390,11 @@ void                  dbus_connection_send_preallocated      (DBusConnection    
                                                               DBusMessage          *message,
                                                               dbus_uint32_t        *client_serial);
 
+#if defined(POLICY_IN_LIB) && !defined(REMOVE_POLICY_FROM_DAEMON)
+dbus_bool_t           _dbus_connection_send_unlocked_no_update_no_static  (DBusConnection *connection,
+                                                                DBusMessage    *message,
+                                                                dbus_uint32_t  *client_serial);
+#endif
 
 /* Object tree functionality */
 

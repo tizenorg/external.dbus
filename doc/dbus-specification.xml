@@ -1,53 +1,53 @@
 <?xml version="1.0" standalone="no" ?>
-<!DOCTYPE article PUBLIC "-//OASIS//DTD DocBook XML V4.1.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.1.2/docbookx.dtd"
+<!DOCTYPE article PUBLIC "-//OASIS//DTD DocBook XML V4.4//EN"
+"http://www.oasis-open.org/docbook/xml/4.4/docbookx.dtd"
 [
 ]>
 <article id="index">
   <articleinfo>
     <title>D-Bus Specification</title>
-    <releaseinfo>Version 0.19</releaseinfo>
-    <date>2012-02-21</date>
+    <releaseinfo>Version 0.23</releaseinfo>
+    <date>2014-01-06</date>
     <authorgroup>
       <author>
-	<firstname>Havoc</firstname>
-	<surname>Pennington</surname>
-	<affiliation>
-	  <orgname>Red Hat, Inc.</orgname>
-	  <address>
-	    <email>hp@pobox.com</email>
-	  </address>
-	</affiliation>
+        <firstname>Havoc</firstname>
+        <surname>Pennington</surname>
+        <affiliation>
+          <orgname>Red Hat, Inc.</orgname>
+          <address>
+            <email>hp@pobox.com</email>
+          </address>
+        </affiliation>
       </author>
       <author>
-	<firstname>Anders</firstname>
-	<surname>Carlsson</surname>
-	<affiliation>
-	  <orgname>CodeFactory AB</orgname>
-	  <address>
+        <firstname>Anders</firstname>
+        <surname>Carlsson</surname>
+        <affiliation>
+          <orgname>CodeFactory AB</orgname>
+          <address>
             <email>andersca@codefactory.se</email>
           </address>
-	</affiliation>
+        </affiliation>
       </author>
       <author>
-	<firstname>Alexander</firstname>
-	<surname>Larsson</surname>
-	<affiliation>
-	  <orgname>Red Hat, Inc.</orgname>
-	  <address>
+        <firstname>Alexander</firstname>
+        <surname>Larsson</surname>
+        <affiliation>
+          <orgname>Red Hat, Inc.</orgname>
+          <address>
             <email>alexl@redhat.com</email>
           </address>
-	</affiliation>
+        </affiliation>
       </author>
       <author>
-	<firstname>Sven</firstname>
-	<surname>Herzberg</surname>
-	<affiliation>
-	  <orgname>Imendio AB</orgname>
-	  <address>
+        <firstname>Sven</firstname>
+        <surname>Herzberg</surname>
+        <affiliation>
+          <orgname>Imendio AB</orgname>
+          <address>
             <email>sven@imendio.com</email>
           </address>
-	</affiliation>
+        </affiliation>
       </author>
       <author>
         <firstname>Simon</firstname>
@@ -63,19 +63,45 @@
         <firstname>David</firstname>
         <surname>Zeuthen</surname>
         <affiliation>
-          <orgname>Red Hat, Inc.</orgname>
           <address>
-            <email>davidz@redhat.com</email>
+            <email>zeuthen@gmail.com</email>
           </address>
         </affiliation>
       </author>
     </authorgroup>
    <revhistory>
      <revision>
-       <revnumber>current</revnumber>
-       <date><ulink url='http://cgit.freedesktop.org/dbus/dbus/log/doc/dbus-specification.xml'>commit log</ulink></date>
+       <revnumber>0.23</revnumber>
+       <date>2014-01-06</date>
+       <authorinitials>SMcV, CY</authorinitials>
+       <revremark>
+         method call messages with no INTERFACE may be considered an error;
+         document tcp:bind=... and nonce-tcp:bind=...; define listenable
+         and connectable addresses
+       </revremark>
+     </revision>
+     <revision>
+       <revnumber>0.22</revnumber>
+       <date>2013-10-09</date>
        <authorinitials></authorinitials>
-       <revremark></revremark>
+       <revremark>add GetConnectionCredentials, document
+        GetAtdAuditSessionData, document GetConnectionSELinuxSecurityContext,
+        document and correct .service file syntax and naming
+      </revremark>
+     </revision>
+     <revision>
+       <revnumber>0.21</revnumber>
+       <date>2013-04-25</date>
+       <authorinitials>smcv</authorinitials>
+       <revremark>allow Unicode noncharacters in UTF-8 (Unicode
+         Corrigendum #9)</revremark>
+     </revision>
+     <revision>
+       <revnumber>0.20</revnumber>
+       <date>22 February 2013</date>
+       <authorinitials>smcv, walters</authorinitials>
+       <revremark>reorganise for clarity, remove false claims about
+         basic types, mention /o/fd/DBus</revremark>
      </revision>
      <revision>
        <revnumber>0.19</revnumber>
@@ -161,23 +187,18 @@
   <sect1 id="introduction">
     <title>Introduction</title>
     <para>
-      D-Bus is a system for low-latency, low-overhead, easy to use
+      D-Bus is a system for low-overhead, easy to use
       interprocess communication (IPC). In more detail:
       <itemizedlist>
-        <listitem>
-          <para>
-            D-Bus is <emphasis>low-latency</emphasis> because it is designed 
-            to avoid round trips and allow asynchronous operation, much like 
-            the X protocol.
-          </para>
-        </listitem>
         <listitem>
           <para>
             D-Bus is <emphasis>low-overhead</emphasis> because it uses a
             binary protocol, and does not have to convert to and from a text
             format such as XML. Because D-Bus is intended for potentially
             high-resolution same-machine IPC, not primarily for Internet IPC,
-            this is an interesting optimization.
+            this is an interesting optimization. D-Bus is also designed to
+            avoid round trips and allow asynchronous operation, much like
+            the X protocol.
           </para>
         </listitem>
         <listitem>
@@ -292,17 +313,68 @@
       it back from the wire format is <firstterm>unmarshaling</firstterm>.
     </para>
 
-    <sect2 id="message-protocol-signatures">
-      <title>Type Signatures</title>
+    <para>
+      The D-Bus protocol does not include type tags in the marshaled data; a
+      block of marshaled values must have a known <firstterm>type
+        signature</firstterm>. The type signature is made up of zero or more
+      <firstterm id="term-single-complete-type">single complete
+        types</firstterm>, each made up of one or more
+      <firstterm>type codes</firstterm>.
+    </para>
+
+    <para>
+      A type code is an ASCII character representing the
+      type of a value. Because ASCII characters are used, the type signature
+      will always form a valid ASCII string. A simple string compare
+      determines whether two type signatures are equivalent.
+    </para>
+
+    <para>
+      A single complete type is a sequence of type codes that fully describes
+      one type: either a basic type, or a single fully-described container type.
+      A single complete type is a basic type code, a variant type code,
+      an array with its element type, or a struct with its fields (all of which
+      are defined below). So the following signatures are not single complete
+      types:
+      <programlisting>
+        "aa"
+      </programlisting>
+      <programlisting>
+        "(ii"
+      </programlisting>
+      <programlisting>
+        "ii)"
+      </programlisting>
+      And the following signatures contain multiple complete types:
+      <programlisting>
+        "ii"
+      </programlisting>
+      <programlisting>
+        "aiai"
+      </programlisting>
+      <programlisting>
+        "(ii)(ii)"
+      </programlisting>
+      Note however that a single complete type may <emphasis>contain</emphasis>
+      multiple other single complete types, by containing a struct or dict
+      entry.
+    </para>
+
+    <sect2 id="basic-types">
+      <title>Basic types</title>
 
       <para>
-        The D-Bus protocol does not include type tags in the marshaled data; a
-        block of marshaled values must have a known <firstterm>type
-        signature</firstterm>.  The type signature is made up of <firstterm>type
-        codes</firstterm>. A type code is an ASCII character representing the
-        type of a value. Because ASCII characters are used, the type signature
-        will always form a valid ASCII string. A simple string compare 
-        determines whether two type signatures are equivalent.
+        The simplest type codes are the <firstterm id="term-basic-type">basic
+          types</firstterm>, which are the types whose structure is entirely
+        defined by their 1-character type code. Basic types consist of
+        fixed types and string-like types.
+      </para>
+
+      <para>
+        The <firstterm id="term-fixed-type">fixed types</firstterm>
+        are basic types whose values have a fixed length, namely BYTE,
+        BOOLEAN, DOUBLE, UNIX_FD, and signed or unsigned integers of length
+        16, 32 or 64 bits.
       </para>
 
       <para>
@@ -319,10 +391,267 @@
       </para>
 
       <para>
-        All <firstterm>basic</firstterm> types work like 
-        <literal>INT32</literal> in this example. To marshal and unmarshal 
-        basic types, you simply read one value from the data
-        block corresponding to each type code in the signature.
+        The characteristics of the fixed types are listed in this table.
+
+        <informaltable>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Conventional name</entry>
+                <entry>ASCII type-code</entry>
+                <entry>Encoding</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>BYTE</literal></entry>
+                <entry><literal>y</literal> (121)</entry>
+                <entry>Unsigned 8-bit integer</entry>
+              </row>
+              <row>
+                <entry><literal>BOOLEAN</literal></entry>
+                <entry><literal>b</literal> (98)</entry>
+                <entry>Boolean value: 0 is false, 1 is true, any other value
+                  allowed by the marshalling format is invalid</entry>
+              </row>
+              <row>
+                <entry><literal>INT16</literal></entry>
+                <entry><literal>n</literal> (110)</entry>
+                <entry>Signed (two's complement) 16-bit integer</entry>
+              </row>
+              <row>
+                <entry><literal>UINT16</literal></entry>
+                <entry><literal>q</literal> (113)</entry>
+                <entry>Unsigned 16-bit integer</entry>
+              </row>
+              <row>
+                <entry><literal>INT32</literal></entry>
+                <entry><literal>i</literal> (105)</entry>
+                <entry>Signed (two's complement) 32-bit integer</entry>
+              </row>
+              <row>
+                <entry><literal>UINT32</literal></entry>
+                <entry><literal>u</literal> (117)</entry>
+                <entry>Unsigned 32-bit integer</entry>
+              </row>
+              <row>
+                <entry><literal>INT64</literal></entry>
+                <entry><literal>x</literal> (120)</entry>
+                <entry>Signed (two's complement) 64-bit integer
+                  (mnemonic: x and t are the first characters in "sixty" not
+                  already used for something more common)</entry>
+              </row>
+              <row>
+                <entry><literal>UINT64</literal></entry>
+                <entry><literal>t</literal> (116)</entry>
+                <entry>Unsigned 64-bit integer</entry>
+              </row>
+              <row>
+                <entry><literal>DOUBLE</literal></entry>
+                <entry><literal>d</literal> (100)</entry>
+                <entry>IEEE 754 double-precision floating point</entry>
+              </row>
+              <row>
+                <entry><literal>UNIX_FD</literal></entry>
+                <entry><literal>h</literal> (104)</entry>
+                <entry>Unsigned 32-bit integer representing an index into an
+                  out-of-band array of file descriptors, transferred via some
+                  platform-specific mechanism (mnemonic: h for handle)</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </informaltable>
+      </para>
+
+      <para>
+        The <firstterm id="term-string-like-type">string-like types</firstterm>
+        are basic types with a variable length. The value of any string-like
+        type is conceptually 0 or more Unicode codepoints encoded in UTF-8,
+        none of which may be U+0000. The UTF-8 text must be validated
+        strictly: in particular, it must not contain overlong sequences
+        or codepoints above U+10FFFF.
+      </para>
+
+      <para>
+        Since D-Bus Specification version 0.21, in accordance with Unicode
+        Corrigendum #9, the "noncharacters" U+FDD0..U+FDEF, U+nFFFE and
+        U+nFFFF are allowed in UTF-8 strings (but note that older versions of
+        D-Bus rejected these noncharacters).
+      </para>
+
+      <para>
+        The marshalling formats for the string-like types all end with a
+        single zero (NUL) byte, but that byte is not considered to be part of
+        the text.
+      </para>
+
+      <para>
+        The characteristics of the string-like types are listed in this table.
+
+        <informaltable>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Conventional name</entry>
+                <entry>ASCII type-code</entry>
+                <entry>Validity constraints</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>STRING</literal></entry>
+                <entry><literal>s</literal> (115)</entry>
+                <entry>No extra constraints</entry>
+              </row>
+              <row>
+                <entry><literal>OBJECT_PATH</literal></entry>
+                <entry><literal>o</literal> (111)</entry>
+                <entry>Must be
+                  <link linkend="message-protocol-marshaling-object-path">a
+                    syntactically valid object path</link></entry>
+              </row>
+              <row>
+                <entry><literal>SIGNATURE</literal></entry>
+                <entry><literal>g</literal> (103)</entry>
+                <entry>Zero or more
+                  <firstterm linkend="term-single-complete-type">single
+                    complete types</firstterm></entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </informaltable>
+      </para>
+
+      <sect3 id="message-protocol-marshaling-object-path">
+        <title>Valid Object Paths</title>
+
+        <para>
+          An object path is a name used to refer to an object instance.
+          Conceptually, each participant in a D-Bus message exchange may have
+          any number of object instances (think of C++ or Java objects) and each
+          such instance will have a path. Like a filesystem, the object
+          instances in an application form a hierarchical tree.
+        </para>
+
+        <para>
+          Object paths are often namespaced by starting with a reversed
+          domain name and containing an interface version number, in the
+          same way as
+          <link linkend="message-protocol-names-interface">interface
+            names</link> and
+          <link linkend="message-protocol-names-bus">well-known
+            bus names</link>.
+          This makes it possible to implement more than one service, or
+          more than one version of a service, in the same process,
+          even if the services share a connection but cannot otherwise
+          co-operate (for instance, if they are implemented by different
+          plugins).
+        </para>
+
+        <para>
+          For instance, if the owner of <literal>example.com</literal> is
+          developing a D-Bus API for a music player, they might use the
+          hierarchy of object paths that start with
+          <literal>/com/example/MusicPlayer1</literal> for its objects.
+        </para>
+
+        <para>
+          The following rules define a valid object path. Implementations must
+          not send or accept messages with invalid object paths.
+          <itemizedlist>
+            <listitem>
+              <para>
+                The path may be of any length.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                The path must begin with an ASCII '/' (integer 47) character,
+                and must consist of elements separated by slash characters.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                Each element must only contain the ASCII characters
+                "[A-Z][a-z][0-9]_"
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                No element may be the empty string.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                Multiple '/' characters cannot occur in sequence.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                A trailing '/' character is not allowed unless the
+                path is the root path (a single '/' character).
+              </para>
+            </listitem>
+          </itemizedlist>
+        </para>
+
+      </sect3>
+
+      <sect3 id="message-protocol-marshaling-signature">
+        <title>Valid Signatures</title>
+        <para>
+          An implementation must not send or accept invalid signatures.
+          Valid signatures will conform to the following rules:
+          <itemizedlist>
+            <listitem>
+              <para>
+                The signature is a list of single complete types.
+                Arrays must have element types, and structs must
+                have both open and close parentheses.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                Only type codes, open and close parentheses, and open and
+                close curly brackets are allowed in the signature. The
+                <literal>STRUCT</literal> type code
+                is not allowed in signatures, because parentheses
+                are used instead. Similarly, the
+                <literal>DICT_ENTRY</literal> type code is not allowed in
+                signatures, because curly brackets are used instead.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                The maximum depth of container type nesting is 32 array type
+                codes and 32 open parentheses. This implies that the maximum
+                total depth of recursion is 64, for an "array of array of array
+                of ... struct of struct of struct of ..."  where there are 32
+                array and 32 struct.
+              </para>
+            </listitem>
+            <listitem>
+              <para>
+                The maximum length of a signature is 255.
+              </para>
+            </listitem>
+          </itemizedlist>
+        </para>
+
+        <para>
+          When signatures appear in messages, the marshalling format
+          guarantees that they will be followed by a nul byte (which can
+          be interpreted as either C-style string termination or the INVALID
+          type-code), but this is not conceptually part of the signature.
+        </para>
+      </sect3>
+
+    </sect2>
+
+    <sect2 id="container-types">
+      <title>Container types</title>
+
+      <para>
         In addition to basic types, there are four <firstterm>container</firstterm> 
         types: <literal>STRUCT</literal>, <literal>ARRAY</literal>, <literal>VARIANT</literal>, 
         and <literal>DICT_ENTRY</literal>.
@@ -378,38 +707,18 @@
       </para>
 
       <para>
-        The phrase <firstterm>single complete type</firstterm> deserves some 
-        definition. A single complete type is a basic type code, a variant type code, 
-        an array with its element type, or a struct with its fields. 
-        So the following signatures are not single complete types:
-        <programlisting>
-          "aa"
-        </programlisting>
-        <programlisting>
-          "(ii"
-        </programlisting>
-        <programlisting>
-          "ii)"
-        </programlisting>
-        And the following signatures contain multiple complete types:
-        <programlisting>
-          "ii"
-        </programlisting>
-        <programlisting>
-          "aiai"
-        </programlisting>
-        <programlisting>
-          "(ii)(ii)"
-        </programlisting>
-        Note however that a single complete type may <emphasis>contain</emphasis>
-        multiple other single complete types.
-      </para>
-
-      <para>
         <literal>VARIANT</literal> has ASCII character 'v' as its type code. A marshaled value of
         type <literal>VARIANT</literal> will have the signature of a single complete type as part
         of the <emphasis>value</emphasis>.  This signature will be followed by a
         marshaled value of that type.
+      </para>
+
+      <para>
+        Unlike a message signature, the variant signature can
+        contain only a single complete type.  So "i", "ai"
+        or "(ii)" is OK, but "ii" is not.  Use of variants may not
+        cause a total message depth to be larger than 64, including
+        other container types such as structures.
       </para>
 
       <para>
@@ -435,6 +744,10 @@
         In most languages, an array of dict entry would be represented as a 
         map, hash table, or dict object.
       </para>
+    </sect2>
+
+    <sect2>
+      <title>Summary of types</title>
 
       <para>
         The following table summarizes the D-Bus types.
@@ -453,14 +766,14 @@
                 <entry>0 (ASCII NUL)</entry>
                 <entry>Not a valid type code, used to terminate signatures</entry>
               </row><row>
-		<entry><literal>BYTE</literal></entry>
-		<entry>121 (ASCII 'y')</entry>
-		<entry>8-bit unsigned integer</entry>
+                <entry><literal>BYTE</literal></entry>
+                <entry>121 (ASCII 'y')</entry>
+                <entry>8-bit unsigned integer</entry>
               </row><row>
-		<entry><literal>BOOLEAN</literal></entry>
-		<entry>98 (ASCII 'b')</entry>
-		<entry>Boolean value, 0 is <literal>FALSE</literal> and 1 is <literal>TRUE</literal>. Everything else is invalid.</entry>
-	      </row><row>
+                <entry><literal>BOOLEAN</literal></entry>
+                <entry>98 (ASCII 'b')</entry>
+                <entry>Boolean value, 0 is <literal>FALSE</literal> and 1 is <literal>TRUE</literal>. Everything else is invalid.</entry>
+              </row><row>
                 <entry><literal>INT16</literal></entry>
                 <entry>110 (ASCII 'n')</entry>
                 <entry>16-bit signed integer</entry>
@@ -468,7 +781,7 @@
                 <entry><literal>UINT16</literal></entry>
                 <entry>113 (ASCII 'q')</entry>
                 <entry>16-bit unsigned integer</entry>
-	      </row><row>
+              </row><row>
                 <entry><literal>INT32</literal></entry>
                 <entry>105 (ASCII 'i')</entry>
                 <entry>32-bit signed integer</entry>
@@ -476,7 +789,7 @@
                 <entry><literal>UINT32</literal></entry>
                 <entry>117 (ASCII 'u')</entry>
                 <entry>32-bit unsigned integer</entry>
-	      </row><row>
+              </row><row>
                 <entry><literal>INT64</literal></entry>
                 <entry>120 (ASCII 'x')</entry>
                 <entry>64-bit signed integer</entry>
@@ -566,9 +879,21 @@
       </para>
 
     </sect2>
+  </sect1>
 
-    <sect2 id="message-protocol-marshaling">
-      <title>Marshaling (Wire Format)</title>
+  <sect1 id="message-protocol-marshaling">
+    <title>Marshaling (Wire Format)</title>
+
+    <para>
+      D-Bus defines a marshalling format for its type system, which is
+      used in D-Bus messages. This is not the only possible marshalling
+      format for the type system: for instance, GVariant (part of GLib)
+      re-uses the D-Bus type system but implements an alternative marshalling
+      format.
+    </para>
+
+    <sect2>
+      <title>Byte order and alignment</title>
 
       <para>
         Given a type signature, a block of bytes can be converted into typed
@@ -577,11 +902,11 @@
       </para>
 
       <para>
-        A block of bytes has an associated byte order. The byte order 
-        has to be discovered in some way; for D-Bus messages, the 
-        byte order is part of the message header as described in 
-        <xref linkend="message-protocol-messages"/>. For now, assume 
-        that the byte order is known to be either little endian or big 
+        A block of bytes has an associated byte order. The byte order
+        has to be discovered in some way; for D-Bus messages, the
+        byte order is part of the message header as described in
+        <xref linkend="message-protocol-messages"/>. For now, assume
+        that the byte order is known to be either little endian or big
           endian.
       </para>
 
@@ -595,6 +920,95 @@
         not be left uninitialized (it can't contain garbage), and more padding
         than required must not be used.
       </para>
+
+      <para>
+        As an exception to natural alignment, <literal>STRUCT</literal> and
+        <literal>DICT_ENTRY</literal> values are always aligned to an 8-byte
+        boundary, regardless of the alignments of their contents.
+      </para>
+    </sect2>
+
+    <sect2>
+      <title>Marshalling basic types</title>
+
+      <para>
+        To marshal and unmarshal fixed types, you simply read one value
+        from the data block corresponding to each type code in the signature.
+        All signed integer values are encoded in two's complement, DOUBLE
+        values are IEEE 754 double-precision floating-point, and BOOLEAN
+        values are encoded in 32 bits (of which only the least significant
+        bit is used).
+      </para>
+
+      <para>
+        The string-like types are all marshalled as a
+        fixed-length unsigned integer <varname>n</varname> giving the
+        length of the variable part, followed by <varname>n</varname>
+        nonzero bytes of UTF-8 text, followed by a single zero (nul) byte
+        which is not considered to be part of the text. The alignment
+        of the string-like type is the same as the alignment of
+        <varname>n</varname>.
+      </para>
+
+      <para>
+        For the STRING and OBJECT_PATH types, <varname>n</varname> is
+        encoded in 4 bytes, leading to 4-byte alignment.
+        For the SIGNATURE type, <varname>n</varname> is encoded as a single
+        byte. As a result, alignment padding is never required before a
+        SIGNATURE.
+      </para>
+    </sect2>
+
+    <sect2>
+      <title>Marshalling containers</title>
+
+      <para>
+        Arrays are marshalled as a <literal>UINT32</literal>
+        <varname>n</varname> giving the length of the array data in bytes,
+        followed by alignment padding to the alignment boundary of the array
+        element type, followed by the <varname>n</varname> bytes of the
+        array elements marshalled in sequence. <varname>n</varname> does not
+        include the padding after the length, or any padding after the
+        last element.
+      </para>
+
+      <para>
+        For instance, if the current position in the message is a multiple
+        of 8 bytes and the byte-order is big-endian, an array containing only
+        the 64-bit integer 5 would be marshalled as:
+
+        <screen>
+00 00 00 08               <lineannotation>8 bytes of data</lineannotation>
+00 00 00 00               <lineannotation>padding to 8-byte boundary</lineannotation>
+00 00 00 00  00 00 00 05  <lineannotation>first element = 5</lineannotation>
+        </screen>
+      </para>
+
+      <para>
+        Arrays have a maximum length defined to be 2 to the 26th power or
+        67108864. Implementations must not send or accept arrays exceeding this
+        length.
+      </para>
+
+      <para>
+        Structs and dict entries are marshalled in the same way as their
+        contents, but their alignment is always to an 8-byte boundary,
+        even if their contents would normally be less strictly aligned.
+      </para>
+
+      <para>
+        Variants are marshalled as the <literal>SIGNATURE</literal> of
+        the contents (which must be a single complete type), followed by a
+        marshalled value with the type given by that signature. The
+        variant has the same 1-byte alignment as the signature, which means
+        that alignment padding before a variant is never needed.
+        Use of variants may not cause a total message depth to be larger
+        than 64, including other container types such as structures.
+      </para>
+    </sect2>
+
+    <sect2>
+      <title>Summary of D-Bus marshalling</title>
 
       <para>
         Given all this, the types are marshaled on the wire as follows:
@@ -661,7 +1075,7 @@
               </row><row>
                 <entry><literal>OBJECT_PATH</literal></entry>
                 <entry>Exactly the same as <literal>STRING</literal> except the 
-                  content must be a valid object path (see below).
+                  content must be a valid object path (see above).
                 </entry>
                 <entry>
                   4 (for the length)
@@ -670,7 +1084,7 @@
                 <entry><literal>SIGNATURE</literal></entry>
                 <entry>The same as <literal>STRING</literal> except the length is a single 
                   byte (thus signatures have a maximum length of 255)
-                  and the content must be a valid signature (see below).
+                  and the content must be a valid signature (see above).
                 </entry>
                 <entry>
                   1
@@ -679,14 +1093,8 @@
                 <entry><literal>ARRAY</literal></entry>
                 <entry>
                   A <literal>UINT32</literal> giving the length of the array data in bytes, followed by 
-                  alignment padding to the alignment boundary of the array element type, 
-                  followed by each array element. The array length is from the 
-                  end of the alignment padding to the end of the last element,
-                  i.e. it does not include the padding after the length,
-                  or any padding after the last element.
-                  Arrays have a maximum length defined to be 2 to the 26th power or
-                  67108864. Implementations must not send or accept arrays exceeding this
-                  length.
+                  alignment padding to the alignment boundary of the array element type,
+                  followed by each array element.
                 </entry>
                 <entry>
                   4 (for the length)
@@ -702,22 +1110,17 @@
                 <entry>
                   8
                 </entry>
-	      </row><row>
+              </row><row>
                 <entry><literal>VARIANT</literal></entry>
                 <entry>
-                  A variant type has a marshaled
-                  <literal>SIGNATURE</literal> followed by a marshaled
-                  value with the type given in the signature.  Unlike
-                  a message signature, the variant signature can
-                  contain only a single complete type.  So "i", "ai"
-                  or "(ii)" is OK, but "ii" is not.  Use of variants may not
-                  cause a total message depth to be larger than 64, including
-		  other container types such as structures.
+                  The marshaled <literal>SIGNATURE</literal> of a single
+                  complete type, followed by a marshaled value with the type
+                  given in the signature.
                 </entry>
                 <entry>
                   1 (alignment of the signature)
                 </entry>
-	      </row><row>
+              </row><row>
                 <entry><literal>DICT_ENTRY</literal></entry>
                 <entry>
                   Identical to STRUCT.
@@ -734,135 +1137,12 @@
                 file descriptor in the array of file descriptors that
                 accompany the message.</entry>
                 <entry>4</entry>
-	      </row>
+              </row>
             </tbody>
           </tgroup>
         </informaltable>
       </para>
-      
-      <sect3 id="message-protocol-marshaling-object-path">
-        <title>Valid Object Paths</title>
-        
-        <para>
-          An object path is a name used to refer to an object instance.
-          Conceptually, each participant in a D-Bus message exchange may have
-          any number of object instances (think of C++ or Java objects) and each
-          such instance will have a path. Like a filesystem, the object
-          instances in an application form a hierarchical tree.
-        </para>
-        
-        <para>
-          The following rules define a valid object path. Implementations must 
-          not send or accept messages with invalid object paths.
-          <itemizedlist>
-            <listitem>
-              <para>
-                The path may be of any length.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                The path must begin with an ASCII '/' (integer 47) character, 
-                and must consist of elements separated by slash characters.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                Each element must only contain the ASCII characters 
-                "[A-Z][a-z][0-9]_"
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                No element may be the empty string.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                Multiple '/' characters cannot occur in sequence.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                A trailing '/' character is not allowed unless the 
-                path is the root path (a single '/' character).
-              </para>
-            </listitem>
-          </itemizedlist>
-        </para>
 
-        <para>
-          Object paths are often namespaced by starting with a reversed
-          domain name and containing an interface version number, in the
-          same way as
-          <link linkend="message-protocol-names-interface">interface
-            names</link> and
-          <link linkend="message-protocol-names-bus">well-known
-            bus names</link>.
-          This makes it possible to implement more than one service, or
-          more than one version of a service, in the same process,
-          even if the services share a connection but cannot otherwise
-          co-operate (for instance, if they are implemented by different
-          plugins).
-        </para>
-
-        <para>
-          For instance, if the owner of <literal>example.com</literal> is
-          developing a D-Bus API for a music player, they might use the
-          hierarchy of object paths that start with
-          <literal>/com/example/MusicPlayer1</literal> for its objects.
-        </para>
-      </sect3>
-
-      <sect3 id="message-protocol-marshaling-signature">
-        <title>Valid Signatures</title>
-        <para>
-          An implementation must not send or accept invalid signatures.
-          Valid signatures will conform to the following rules:
-          <itemizedlist>
-            <listitem>
-              <para>
-                The signature ends with a nul byte.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                The signature is a list of single complete types. 
-                Arrays must have element types, and structs must 
-                have both open and close parentheses.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                Only type codes and open and close parentheses are 
-                allowed in the signature. The <literal>STRUCT</literal> type code
-                is not allowed in signatures, because parentheses
-                are used instead.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                The maximum depth of container type nesting is 32 array type
-                codes and 32 open parentheses. This implies that the maximum
-                total depth of recursion is 64, for an "array of array of array
-                of ... struct of struct of struct of ..."  where there are 32
-                array and 32 struct.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                The maximum length of a signature is 255.
-              </para>
-            </listitem>
-            <listitem>
-              <para>
-                Signatures must be nul-terminated.
-              </para>
-            </listitem>
-          </itemizedlist>
-        </para>
-      </sect3>
-      
     </sect2>
 
   </sect1>
@@ -1249,12 +1529,12 @@
                 </para>
             </listitem>
 
-	    <listitem><para>Interface names must contain at least one '.' (period)
+            <listitem><para>Interface names must contain at least one '.' (period)
               character (and thus at least two elements).
               </para></listitem>
 
-	    <listitem><para>Interface names must not begin with a '.' (period) character.</para></listitem>
-	    <listitem><para>Interface names must not exceed the maximum name length.</para></listitem>
+            <listitem><para>Interface names must not begin with a '.' (period) character.</para></listitem>
+            <listitem><para>Interface names must not exceed the maximum name length.</para></listitem>
           </itemizedlist>
         </para>
 
@@ -1313,12 +1593,12 @@
                 </para>
             </listitem>
 
-	    <listitem><para>Bus names must contain at least one '.' (period)
+            <listitem><para>Bus names must contain at least one '.' (period)
               character (and thus at least two elements).
               </para></listitem>
 
-	    <listitem><para>Bus names must not begin with a '.' (period) character.</para></listitem>
-	    <listitem><para>Bus names must not exceed the maximum name length.</para></listitem>
+            <listitem><para>Bus names must not begin with a '.' (period) character.</para></listitem>
+            <listitem><para>Bus names must not exceed the maximum name length.</para></listitem>
           </itemizedlist>
         </para>
         <para>
@@ -1356,12 +1636,12 @@
         <para>
           Member (i.e. method or signal) names:
           <itemizedlist>
-	    <listitem><para>Must only contain the ASCII characters
+            <listitem><para>Must only contain the ASCII characters
                 "[A-Z][a-z][0-9]_" and may not begin with a
                 digit.</para></listitem>
-	    <listitem><para>Must not contain the '.' (period) character.</para></listitem>
-	    <listitem><para>Must not exceed the maximum name length.</para></listitem>
-	    <listitem><para>Must be at least 1 byte in length.</para></listitem>
+            <listitem><para>Must not contain the '.' (period) character.</para></listitem>
+            <listitem><para>Must not exceed the maximum name length.</para></listitem>
+            <listitem><para>Must be at least 1 byte in length.</para></listitem>
           </itemizedlist>
         </para>
 
@@ -1409,12 +1689,25 @@
         <para>
           A method call message is required to have a <literal>MEMBER</literal> header field
           indicating the name of the method. Optionally, the message has an
-          <literal>INTERFACE</literal> field giving the interface the method is a part of. In the
-          absence of an <literal>INTERFACE</literal> field, if two interfaces on the same object have
-          a method with the same name, it is undefined which of the two methods
-          will be invoked. Implementations may also choose to return an error in
-          this ambiguous case. However, if a method name is unique
-          implementations must not require an interface field.
+          <literal>INTERFACE</literal> field giving the interface the method is a part of.
+          Including the <literal>INTERFACE</literal> in all method call
+          messages is strongly recommended.
+        </para>
+        <para>
+          In the absence of an <literal>INTERFACE</literal> field, if two
+          or more interfaces on the same object have a method with the same
+          name, it is undefined which of those methods will be invoked.
+          Implementations may choose to either return an error, or deliver the
+          message as though it had an arbitrary one of those interfaces.
+        </para>
+        <para>
+          In some situations (such as the well-known system bus), messages
+          are filtered through an access-control list external to the
+          remote object implementation. If that filter rejects certain
+          messages by matching their interface, or accepts only messages
+          to specific interfaces, it must also reject messages that have no
+          <literal>INTERFACE</literal>: otherwise, malicious
+          applications could use this to bypass the filter.
         </para>
         <para>
           Method call messages also include a <literal>PATH</literal> field
@@ -1692,23 +1985,23 @@
         Commands from the client to the server are as follows:
 
         <itemizedlist>
-	  <listitem><para>AUTH [mechanism] [initial-response]</para></listitem>
-	  <listitem><para>CANCEL</para></listitem>
-	  <listitem><para>BEGIN</para></listitem>
-	  <listitem><para>DATA &lt;data in hex encoding&gt;</para></listitem>
-	  <listitem><para>ERROR [human-readable error explanation]</para></listitem>
-	  <listitem><para>NEGOTIATE_UNIX_FD</para></listitem>
-	</itemizedlist>
+          <listitem><para>AUTH [mechanism] [initial-response]</para></listitem>
+          <listitem><para>CANCEL</para></listitem>
+          <listitem><para>BEGIN</para></listitem>
+          <listitem><para>DATA &lt;data in hex encoding&gt;</para></listitem>
+          <listitem><para>ERROR [human-readable error explanation]</para></listitem>
+          <listitem><para>NEGOTIATE_UNIX_FD</para></listitem>
+        </itemizedlist>
 
         From server to client are as follows:
 
         <itemizedlist>
-	  <listitem><para>REJECTED &lt;space-separated list of mechanism names&gt;</para></listitem>
-	  <listitem><para>OK &lt;GUID in hex&gt;</para></listitem>
-	  <listitem><para>DATA &lt;data in hex encoding&gt;</para></listitem>
-	  <listitem><para>ERROR</para></listitem>
-	  <listitem><para>AGREE_UNIX_FD</para></listitem>
-	</itemizedlist>
+          <listitem><para>REJECTED &lt;space-separated list of mechanism names&gt;</para></listitem>
+          <listitem><para>OK &lt;GUID in hex&gt;</para></listitem>
+          <listitem><para>DATA &lt;data in hex encoding&gt;</para></listitem>
+          <listitem><para>ERROR</para></listitem>
+          <listitem><para>AGREE_UNIX_FD</para></listitem>
+        </itemizedlist>
       </para>
       <para>
         Unofficial extensions to the command set must begin with the letters 
@@ -1938,18 +2231,18 @@
       
       <para>
         <figure>
-	  <title>Example of successful magic cookie authentication</title>
-	  <programlisting>
+          <title>Example of successful magic cookie authentication</title>
+          <programlisting>
             (MAGIC_COOKIE is a made up mechanism)
 
             C: AUTH MAGIC_COOKIE 3138363935333137393635383634
             S: OK 1234deadbeef
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of finding out mechanisms then picking one</title>
-	  <programlisting>
+          <title>Example of finding out mechanisms then picking one</title>
+          <programlisting>
             C: AUTH
             S: REJECTED KERBEROS_V4 SKEY
             C: AUTH SKEY 7ab83f32ee
@@ -1958,20 +2251,20 @@
             S: OK 1234deadbeef
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of client sends unknown command then falls back to regular auth</title>
-	  <programlisting>
+          <title>Example of client sends unknown command then falls back to regular auth</title>
+          <programlisting>
             C: FOOBAR
             S: ERROR
             C: AUTH MAGIC_COOKIE 3736343435313230333039
             S: OK 1234deadbeef
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of server doesn't support initial auth mechanism</title>
-	  <programlisting>
+          <title>Example of server doesn't support initial auth mechanism</title>
+          <programlisting>
             C: AUTH MAGIC_COOKIE 3736343435313230333039
             S: REJECTED KERBEROS_V4 SKEY
             C: AUTH SKEY 7ab83f32ee
@@ -1980,10 +2273,10 @@
             S: OK 1234deadbeef
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of wrong password or the like followed by successful retry</title>
-	  <programlisting>
+          <title>Example of wrong password or the like followed by successful retry</title>
+          <programlisting>
             C: AUTH MAGIC_COOKIE 3736343435313230333039
             S: REJECTED KERBEROS_V4 SKEY
             C: AUTH SKEY 7ab83f32ee
@@ -1996,10 +2289,10 @@
             S: OK 1234deadbeef
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of skey cancelled and restarted</title>
-	  <programlisting>
+          <title>Example of skey cancelled and restarted</title>
+          <programlisting>
             C: AUTH MAGIC_COOKIE 3736343435313230333039
             S: REJECTED KERBEROS_V4 SKEY
             C: AUTH SKEY 7ab83f32ee
@@ -2012,10 +2305,10 @@
             S: OK 1234deadbeef
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of successful magic cookie authentication with successful negotiation of Unix FD passing</title>
-	  <programlisting>
+          <title>Example of successful magic cookie authentication with successful negotiation of Unix FD passing</title>
+          <programlisting>
             (MAGIC_COOKIE is a made up mechanism)
 
             C: AUTH MAGIC_COOKIE 3138363935333137393635383634
@@ -2024,10 +2317,10 @@
             S: AGREE_UNIX_FD
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
         <figure>
-	  <title>Example of successful magic cookie authentication with unsuccessful negotiation of Unix FD passing</title>
-	  <programlisting>
+          <title>Example of successful magic cookie authentication with unsuccessful negotiation of Unix FD passing</title>
+          <programlisting>
             (MAGIC_COOKIE is a made up mechanism)
 
             C: AUTH MAGIC_COOKIE 3138363935333137393635383634
@@ -2036,7 +2329,7 @@
             S: ERROR
             C: BEGIN
           </programlisting>
-	</figure>
+        </figure>
       </para>
     </sect2>
     <sect2 id="auth-states">
@@ -2174,7 +2467,7 @@
               </listitem>
               <listitem>
                 <para>
-                  Receive REJECT [mechs] &rarr; send AUTH [next mech],
+                  Receive REJECTED [mechs] &rarr; send AUTH [next mech],
                   goto <emphasis>WaitingForData</emphasis> or
                   <emphasis>WaitingForOK</emphasis>
                 </para>
@@ -2210,7 +2503,7 @@
             <itemizedlist>
               <listitem>
                 <para>
-                  Receive REJECT [mechs] &rarr; send AUTH [next mech],
+                  Receive REJECTED [mechs] &rarr; send AUTH [next mech],
                   goto <emphasis>WaitingForData</emphasis> or
                   <emphasis>WaitingForOK</emphasis>
                 </para>
@@ -2252,7 +2545,7 @@
 
             <listitem>
               <para>
-                REJECT means that the client failed to authenticate or
+                REJECTED means that the client failed to authenticate or
                 there was an error in RESP.
               </para>
             </listitem>
@@ -2299,7 +2592,7 @@
                     </member>
 
                     <member>
-                      MECH(RESP) returns REJECT &rarr; send REJECTED
+                      MECH(RESP) returns REJECTED &rarr; send REJECTED
                       [mechs], goto
                       <emphasis>WaitingForAuth</emphasis>
                     </member>
@@ -2353,7 +2646,7 @@
                     </member>
 
                     <member>
-                      MECH(RESP) returns REJECT &rarr; send REJECTED
+                      MECH(RESP) returns REJECTED &rarr; send REJECTED
                       [mechs], goto
                       <emphasis>WaitingForAuth</emphasis>
                     </member>
@@ -2659,6 +2952,35 @@
       <programlisting>unix:path=/tmp/dbus-test;unix:path=/tmp/dbus-test2</programlisting>
     </para>
 
+    <para>
+      Some addresses are <firstterm>connectable</firstterm>. A connectable
+      address is one containing enough information for a client to connect
+      to it. For instance, <literal>tcp:host=127.0.0.1,port=4242</literal>
+      is a connectable address. It is not necessarily possible to listen
+      on every connectable address: for instance, it is not possible to
+      listen on a <literal>unixexec:</literal> address.
+    </para>
+
+    <para>
+      Some addresses are <firstterm>listenable</firstterm>. A listenable
+      address is one containing enough information for a server to listen on
+      it, producing a connectable address (which may differ from the
+      original address). Many listenable addresses are not connectable:
+      for instance, <literal>tcp:host=127.0.0.1</literal>
+      is listenable, but not connectable (because it does not specify
+      a port number).
+    </para>
+
+    <para>
+      Listening on an address that is not connectable will result in a
+      connectable address that is not the same as the listenable address.
+      For instance, listening on <literal>tcp:host=127.0.0.1</literal>
+      might result in the connectable address
+      <literal>tcp:host=127.0.0.1,port=30958</literal>,
+      or listening on <literal>unix:tmpdir=/tmp</literal>
+      might result in the connectable address
+      <literal>unix:abstract=/tmp/dbus-U8OSdmf7</literal>.
+    </para>
   </sect1>
   
   <sect1 id="transports">
@@ -2676,20 +2998,27 @@
       <title>Unix Domain Sockets</title>
       <para>
         Unix domain sockets can be either paths in the file system or on Linux 
-	kernels, they can be abstract which are similar to paths but
-	do not show up in the file system.  
+        kernels, they can be abstract which are similar to paths but
+        do not show up in the file system.
       </para>
 
       <para>
         When a socket is opened by the D-Bus library it truncates the path 
-	name right before the first trailing Nul byte.  This is true for both
-	normal paths and abstract paths.  Note that this is a departure from
-	previous versions of D-Bus that would create sockets with a fixed 
-	length path name.  Names which were shorter than the fixed length
-	would be padded by Nul bytes.
+        name right before the first trailing Nul byte.  This is true for both
+        normal paths and abstract paths.  Note that this is a departure from
+        previous versions of D-Bus that would create sockets with a fixed
+        length path name.  Names which were shorter than the fixed length
+        would be padded by Nul bytes.
       </para>
       <para>
         Unix domain sockets are not available on Windows.
+      </para>
+      <para>
+        Unix addresses that specify <literal>path</literal> or
+        <literal>abstract</literal> are both listenable and connectable.
+        Unix addresses that specify <literal>tmpdir</literal> are only
+        listenable: the corresponding connectable address will specify
+        either <literal>path</literal> or <literal>abstract</literal>.
       </para>
       <sect3 id="transports-unix-domain-sockets-addresses">
         <title>Server Address Format</title>
@@ -2720,11 +3049,16 @@
           <row>
             <entry>abstract</entry>
             <entry>(string)</entry>
-            <entry>unique string (path) in the abstract namespace. If set, the "path" or "tempdir" key must not be set.</entry>
+            <entry>unique string (path) in the abstract namespace. If set, the "path" or "tmpdir" key must not be set. This key is only supported on platforms with "abstract Unix sockets", of which Linux is the only known example.</entry>
           </row>
         </tbody>
         </tgroup>
        </informaltable>
+       <para>
+         Exactly one of the keys <literal>path</literal>,
+         <literal>abstract</literal> or
+         <literal>tmpdir</literal> must be provided.
+       </para>
       </sect3>
     </sect2>
     <sect2 id="transports-launchd">
@@ -2747,6 +3081,9 @@
       </para>
       <para>
         launchd is not available on Microsoft Windows.
+      </para>
+      <para>
+        launchd addresses are listenable and connectable.
       </para>
       <sect3 id="transports-launchd-addresses">
         <title>Server Address Format</title>
@@ -2772,6 +3109,9 @@
         </tbody>
         </tgroup>
        </informaltable>
+       <para>
+         The <literal>env</literal> key is required.
+       </para>
       </sect3>
     </sect2>
     <sect2 id="transports-systemd">
@@ -2794,6 +3134,11 @@
       <para>
         The systemd transport defines no parameter keys.
       </para>
+      <para>
+        systemd addresses are listenable, but not connectable. The
+        corresponding connectable address is the <literal>unix</literal>
+        or <literal>tcp</literal> address of the socket.
+      </para>
     </sect2>
     <sect2 id="transports-tcp-sockets">
       <title>TCP Sockets</title>
@@ -2806,9 +3151,16 @@
         over a network is unsecure. 
       </para>
       <para>  
-        Windows notes: Because of the tcp stack on Windows does not provide sending
-        credentials over a tcp connection, the EXTERNAL authentification 
-        mechanismus does not work. 
+        On Windows and most Unix platforms, the TCP stack is unable to transfer
+        credentials over a TCP connection, so the EXTERNAL authentication
+        mechanism does not work for this transport.
+      </para>
+      <para>
+        All <literal>tcp</literal> addresses are listenable.
+        <literal>tcp</literal> addresses in which both
+        <literal>host</literal> and <literal>port</literal> are
+        specified, and <literal>port</literal> is non-zero,
+        are also connectable.
       </para>
       <sect3 id="transports-tcp-sockets-addresses">
         <title>Server Address Format</title>
@@ -2829,7 +3181,18 @@
            <row>
             <entry>host</entry>
             <entry>(string)</entry>
-            <entry>dns name or ip address</entry>
+            <entry>DNS name or IP address</entry>
+          </row>
+          <row>
+           <entry>bind</entry>
+           <entry>(string)</entry>
+           <entry>Used in a listenable address to configure the interface
+            on which the server will listen: either the IP address of one of
+            the local machine's interfaces (most commonly <literal>127.0.0.1
+            </literal>), or a DNS name that resolves to one of those IP
+            addresses, or '*' to listen on all interfaces simultaneously.
+            If not specified, the default is the same value as "host".
+           </entry>
           </row>
           <row>
            <entry>port</entry>
@@ -2880,6 +3243,12 @@
         key-value pair and send it over the socket. After that, the
         transport behaves like an unsecured tcp transport.
       </para>
+      <para>
+        All nonce-tcp addresses are listenable. nonce-tcp addresses in which
+        <literal>host</literal>, <literal>port</literal> and
+        <literal>noncefile</literal> are all specified,
+        and <literal>port</literal> is nonzero, are also connectable.
+      </para>
       <sect3 id="transports-nonce-tcp-sockets-addresses">
         <title>Server Address Format</title>
         <para> 
@@ -2899,7 +3268,13 @@
            <row>
             <entry>host</entry>
             <entry>(string)</entry>
-            <entry>dns name or ip address</entry>
+            <entry>DNS name or IP address</entry>
+          </row>
+          <row>
+           <entry>bind</entry>
+           <entry>(string)</entry>
+           <entry>The same as for tcp: addresses
+           </entry>
           </row>
           <row>
            <entry>port</entry>
@@ -2917,7 +3292,10 @@
           <row>
            <entry>noncefile</entry>
            <entry>(path)</entry>
-           <entry>file location containing the secret</entry>
+           <entry>File location containing the secret.
+             This is only meaningful in connectable addresses:
+             a listening D-Bus server that offers this transport
+             will always create a new nonce file.</entry>
           </row>
          </tbody>
         </tgroup>
@@ -2939,6 +3317,10 @@
       </para>
       <para>
         Executed subprocesses are not available on Windows.
+      </para>
+      <para>
+        <literal>unixexec</literal> addresses are connectable, but are not
+        listenable.
       </para>
       <sect3 id="transports-exec-addresses">
         <title>Server Address Format</title>
@@ -2998,6 +3380,15 @@
      <para>The autolaunch transport provides a way for dbus clients to autodetect
        a running dbus session bus and to autolaunch a session bus if not present.
      </para>
+      <para>
+        On Unix, <literal>autolaunch</literal> addresses are connectable,
+        but not listenable.
+      </para>
+      <para>
+        On Windows, <literal>autolaunch</literal> addresses are both
+        connectable and listenable.
+      </para>
+
      <sect3 id="meta-transports-autolaunch-addresses">
        <title>Server Address Format</title>
        <para>
@@ -3388,8 +3779,8 @@
       <programlisting>
         &lt;!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
          "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd"&gt;
-        &lt;node name="/org/freedesktop/sample_object"&gt;
-          &lt;interface name="org.freedesktop.SampleInterface"&gt;
+        &lt;node name="/com/example/sample_object"&gt;
+          &lt;interface name="com.example.SampleInterface"&gt;
             &lt;method name="Frobate"&gt;
               &lt;arg name="foo" type="i" direction="in"/&gt;
               &lt;arg name="bar" type="s" direction="out"/&gt;
@@ -3473,38 +3864,38 @@
     <para>
         Method, interface, property, and signal elements may have
         "annotations", which are generic key/value pairs of metadata.
-	They are similar conceptually to Java's annotations and C# attributes.
+        They are similar conceptually to Java's annotations and C# attributes.
         Well-known annotations:
      </para>
      <informaltable>
        <tgroup cols="3">
-	 <thead>
-	   <row>
-	     <entry>Name</entry>
-	     <entry>Values (separated by ,)</entry>
-	     <entry>Description</entry>
-	   </row>
-	 </thead>
-	 <tbody>
-	   <row>
-	     <entry>org.freedesktop.DBus.Deprecated</entry>
-	     <entry>true,false</entry>
-	     <entry>Whether or not the entity is deprecated; defaults to false</entry>
-	   </row>
-	   <row>
-	     <entry>org.freedesktop.DBus.GLib.CSymbol</entry>
-	     <entry>(string)</entry>
-	     <entry>The C symbol; may be used for methods and interfaces</entry>
-	   </row>
-	   <row>
-	     <entry>org.freedesktop.DBus.Method.NoReply</entry>
-	     <entry>true,false</entry>
-	     <entry>If set, don't expect a reply to the method call; defaults to false.</entry>
-	   </row>
-	   <row>
-	     <entry>org.freedesktop.DBus.Property.EmitsChangedSignal</entry>
-	     <entry>true,invalidates,false</entry>
-	     <entry>
+         <thead>
+           <row>
+             <entry>Name</entry>
+             <entry>Values (separated by ,)</entry>
+             <entry>Description</entry>
+           </row>
+         </thead>
+         <tbody>
+           <row>
+             <entry>org.freedesktop.DBus.Deprecated</entry>
+             <entry>true,false</entry>
+             <entry>Whether or not the entity is deprecated; defaults to false</entry>
+           </row>
+           <row>
+             <entry>org.freedesktop.DBus.GLib.CSymbol</entry>
+             <entry>(string)</entry>
+             <entry>The C symbol; may be used for methods and interfaces</entry>
+           </row>
+           <row>
+             <entry>org.freedesktop.DBus.Method.NoReply</entry>
+             <entry>true,false</entry>
+             <entry>If set, don't expect a reply to the method call; defaults to false.</entry>
+           </row>
+           <row>
+             <entry>org.freedesktop.DBus.Property.EmitsChangedSignal</entry>
+             <entry>true,invalidates,false</entry>
+             <entry>
                <para>
                  If set to <literal>false</literal>, the
                  <literal>org.freedesktop.DBus.Properties.PropertiesChanged</literal>
@@ -3529,8 +3920,8 @@
                  interface element.
                </para>
              </entry>
-	   </row>
-	 </tbody>
+           </row>
+         </tbody>
        </tgroup>
      </informaltable>
   </sect1>
@@ -3549,14 +3940,17 @@
         unique-for-the-lifetime-of-the-bus name automatically assigned.
         Applications may request additional names for a connection. Additional
         names are usually "well-known names" such as
-        "org.freedesktop.TextEditor". When a name is bound to a connection,
+        "com.example.TextEditor". When a name is bound to a connection,
         that connection is said to <firstterm>own</firstterm> the name.
       </para>
       <para>
-        The bus itself owns a special name, <literal>org.freedesktop.DBus</literal>. 
-        This name routes messages to the bus, allowing applications to make 
-        administrative requests. For example, applications can ask the bus 
-        to assign a name to a connection.
+        The bus itself owns a special name,
+        <literal>org.freedesktop.DBus</literal>, with an object
+        located at <literal>/org/freedesktop/DBus</literal> that
+        implements the <literal>org.freedesktop.DBus</literal>
+        interface. This service allows applications to make
+        administrative requests of the bus itself. For example,
+        applications can ask the bus to assign a name to a connection.
       </para>
       <para>
         Each name may have <firstterm>queued owners</firstterm>.  When an
@@ -3568,7 +3962,7 @@
 
       <para>
         This feature causes the right thing to happen if you start two text
-        editors for example; the first one may request "org.freedesktop.TextEditor", 
+        editors for example; the first one may request "com.example.TextEditor",
         and the second will be queued as a possible owner of that name. When 
         the first exits, the second will take over.
       </para>
@@ -3640,11 +4034,11 @@
                   <entry>STRING</entry>
                   <entry>Name to request</entry>
                 </row>
-	        <row>
-		  <entry>1</entry>
-		  <entry>UINT32</entry>
-		  <entry>Flags</entry>
-	        </row>
+                <row>
+                  <entry>1</entry>
+                  <entry>UINT32</entry>
+                  <entry>Flags</entry>
+                </row>
               </tbody>
             </tgroup>
           </informaltable>
@@ -3755,10 +4149,10 @@
                 </row>
               </thead>
               <tbody>
-	        <row>
-		  <entry>DBUS_NAME_FLAG_ALLOW_REPLACEMENT</entry>
-		  <entry>0x1</entry>
-		  <entry>
+                <row>
+                  <entry>DBUS_NAME_FLAG_ALLOW_REPLACEMENT</entry>
+                  <entry>0x1</entry>
+                  <entry>
 
                     If an application A specifies this flag and succeeds in
                     becoming the owner of the name, and another application B
@@ -3772,11 +4166,11 @@
                     application A as the owner.
 
                   </entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_NAME_FLAG_REPLACE_EXISTING</entry>
-		  <entry>0x2</entry>
-		  <entry>
+                </row>
+                <row>
+                  <entry>DBUS_NAME_FLAG_REPLACE_EXISTING</entry>
+                  <entry>0x2</entry>
+                  <entry>
 
                     Try to replace the current owner if there is one. If this
                     flag is not set the application will only become the owner of
@@ -3785,11 +4179,11 @@
                     the current owner specified DBUS_NAME_FLAG_ALLOW_REPLACEMENT.
 
                   </entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_NAME_FLAG_DO_NOT_QUEUE</entry>
-		  <entry>0x4</entry>
-		  <entry>
+                </row>
+                <row>
+                  <entry>DBUS_NAME_FLAG_DO_NOT_QUEUE</entry>
+                  <entry>0x4</entry>
+                  <entry>
 
                     Without this flag, if an application requests a name that is
                     already owned, the application will be placed in a queue to
@@ -3802,10 +4196,10 @@
                     became the name owner.
 
                   </entry>
-	        </row>
-	      </tbody>
-	    </tgroup>
-	  </informaltable>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
 
           The return code can be one of the following values:
 
@@ -3819,41 +4213,41 @@
                 </row>
               </thead>
               <tbody>
-	        <row>
+                <row>
                   <entry>DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER</entry>
-		  <entry>1</entry> <entry>The caller is now the primary owner of
-		  the name, replacing any previous owner. Either the name had no
-		  owner before, or the caller specified
-		  DBUS_NAME_FLAG_REPLACE_EXISTING and the current owner specified
+                  <entry>1</entry> <entry>The caller is now the primary owner of
+                  the name, replacing any previous owner. Either the name had no
+                  owner before, or the caller specified
+                  DBUS_NAME_FLAG_REPLACE_EXISTING and the current owner specified
                   DBUS_NAME_FLAG_ALLOW_REPLACEMENT.</entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_REQUEST_NAME_REPLY_IN_QUEUE</entry>
-		  <entry>2</entry>
+                </row>
+                <row>
+                  <entry>DBUS_REQUEST_NAME_REPLY_IN_QUEUE</entry>
+                  <entry>2</entry>
 
-		  <entry>The name already had an owner,
+                  <entry>The name already had an owner,
                     DBUS_NAME_FLAG_DO_NOT_QUEUE was not specified, and either
                     the current owner did not specify
                     DBUS_NAME_FLAG_ALLOW_REPLACEMENT or the requesting
                     application did not specify DBUS_NAME_FLAG_REPLACE_EXISTING.
                     </entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_REQUEST_NAME_REPLY_EXISTS</entry> <entry>3</entry>
-		  <entry>The name already has an owner,
-		  DBUS_NAME_FLAG_DO_NOT_QUEUE was specified, and either
-		  DBUS_NAME_FLAG_ALLOW_REPLACEMENT was not specified by the
-		  current owner, or DBUS_NAME_FLAG_REPLACE_EXISTING was not
-		  specified by the requesting application.</entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER</entry>
-		  <entry>4</entry>
-		  <entry>The application trying to request ownership of a name is already the owner of it.</entry>
-	        </row>
-	      </tbody>
-	    </tgroup>
-	  </informaltable>
+                </row>
+                <row>
+                  <entry>DBUS_REQUEST_NAME_REPLY_EXISTS</entry> <entry>3</entry>
+                  <entry>The name already has an owner,
+                  DBUS_NAME_FLAG_DO_NOT_QUEUE was specified, and either
+                  DBUS_NAME_FLAG_ALLOW_REPLACEMENT was not specified by the
+                  current owner, or DBUS_NAME_FLAG_REPLACE_EXISTING was not
+                  specified by the requesting application.</entry>
+                </row>
+                <row>
+                  <entry>DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER</entry>
+                  <entry>4</entry>
+                  <entry>The application trying to request ownership of a name is already the owner of it.</entry>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
         </para>
        </sect3>
 
@@ -3926,7 +4320,7 @@
                 </row>
               </thead>
               <tbody>
-	        <row>
+                <row>
                   <entry>DBUS_RELEASE_NAME_REPLY_RELEASED</entry>
                   <entry>1</entry> <entry>The caller has released his claim on
                   the given name. Either the caller was the primary owner of
@@ -3934,21 +4328,21 @@
                   waiting in the queue for the name, or the caller was waiting
                   in the queue for the name and has now been removed from the
                   queue.</entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_RELEASE_NAME_REPLY_NON_EXISTENT</entry>
-		  <entry>2</entry>
-		  <entry>The given name does not exist on this bus.</entry>
-	        </row>
-	        <row>
-		  <entry>DBUS_RELEASE_NAME_REPLY_NOT_OWNER</entry>
-		  <entry>3</entry>
-		  <entry>The caller was not the primary owner of this name,
+                </row>
+                <row>
+                  <entry>DBUS_RELEASE_NAME_REPLY_NON_EXISTENT</entry>
+                  <entry>2</entry>
+                  <entry>The given name does not exist on this bus.</entry>
+                </row>
+                <row>
+                  <entry>DBUS_RELEASE_NAME_REPLY_NOT_OWNER</entry>
+                  <entry>3</entry>
+                  <entry>The caller was not the primary owner of this name,
                   and was also not waiting in the queue to own this name.</entry>
-	        </row>
-	      </tbody>
-	    </tgroup>
-	  </informaltable>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
         </para>
        </sect3>
 
@@ -4105,12 +4499,19 @@
           adding the same rule with the <literal>eavesdrop</literal> match
           omitted.
         </para>
+
+        <para>
+          Eavesdropping interacts poorly with buses with non-trivial
+          access control restrictions. The
+          <xref linkend="bus-messages-become-monitor"/> method provides
+          an alternative way to monitor buses.
+        </para>
       </sect3>
 
       <sect3 id="message-bus-routing-match-rules">
         <title>Match Rules</title>
         <para>
-	  An important part of the message bus routing protocol is match
+          An important part of the message bus routing protocol is match
           rules. Match rules describe the messages that should be sent to a
           client, based on the contents of the message.  Broadcast signals
           are only sent to clients which have a suitable match rule: this
@@ -4140,8 +4541,7 @@
         </para>
         <para>
           The following table describes the keys that can be used to create 
-          a match rule:
-          The following table summarizes the D-Bus types.
+          a match rule.
           <informaltable>
             <tgroup cols="3">
               <thead>
@@ -4343,9 +4743,9 @@
       <para>
         With D-Bus, starting a service is normally done by name. That is,
         applications ask the message bus to start some program that will own a
-        well-known name, such as <literal>org.freedesktop.TextEditor</literal>.
-        This implies a contract documented along with the name 
-        <literal>org.freedesktop.TextEditor</literal> for which objects 
+        well-known name, such as <literal>com.example.TextEditor</literal>.
+        This implies a contract documented along with the name
+        <literal>com.example.TextEditor</literal> for which object
         the owner of that name will provide, and what interfaces those 
         objects will have.
       </para>
@@ -4369,6 +4769,19 @@
       </para>
 
       <para>
+        On the well-known system bus, the name of a service description file
+        must be its well-known name plus <literal>.service</literal>,
+        for instance
+        <literal>com.example.ConfigurationDatabase.service</literal>.
+      </para>
+
+      <para>
+        On the well-known session bus, services should follow the same
+        service description file naming convention as on the system bus,
+        but for backwards compatibility they are not required to do so.
+      </para>
+
+      <para>
         [FIXME the file format should be much better specified than "similar to
         .desktop entries" esp. since desktop entries are already
         badly-specified. ;-)]
@@ -4379,23 +4792,55 @@
           <listitem><para>Comment format</para></listitem>
         </itemizedlist>
 
+        Service description files must contain a
+        <literal>D-BUS Service</literal> group with at least the keys
+        <literal>Name</literal> (the well-known name of the service)
+        and <literal>Exec</literal> (the command to be executed).
+
         <figure>
-	  <title>Example service description file</title>
-	  <programlisting>
+          <title>Example service description file</title>
+          <programlisting>
             # Sample service description file
             [D-BUS Service]
-            Names=org.freedesktop.ConfigurationDatabase;org.gnome.GConf;
-            Exec=/usr/libexec/gconfd-2
+            Name=com.example.ConfigurationDatabase
+            Exec=/usr/bin/sample-configd
           </programlisting>
-	</figure>
+        </figure>
       </para>
+
+      <para>
+        Additionally, service description files for the well-known system
+        bus on Unix must contain a <literal>User</literal> key, whose value
+        is the name of a user account (e.g. <literal>root</literal>).
+        The system service will be run as that user.
+      </para>
+
       <para>
         When an application asks to start a service by name, the bus daemon tries to
         find a service that will own that name. It then tries to spawn the
         executable associated with it. If this fails, it will report an
-        error. [FIXME what happens if two .service files offer the same service;
-        what kind of error is reported, should we have a way for the client to
-        choose one?]
+        error.
+      </para>
+
+      <para>
+        On the well-known system bus, it is not possible for two .service files
+        in the same directory to offer the same service, because they are
+        constrained to have names that match the service name.
+      </para>
+
+      <para>
+        On the well-known session bus, if two .service files in the same
+        directory offer the same service name, the result is undefined.
+        Distributors should avoid this situation, for instance by naming
+        session services' .service files according to their service name.
+      </para>
+
+      <para>
+        If two .service files in different directories offer the same
+        service name, the one in the higher-priority directory is used:
+        for instance, on the system bus, .service files in
+        /usr/local/share/dbus-1/system-services take precedence over those
+        in /usr/share/dbus-1/system-services.
       </para>
       <para>
         The executable launched will have the environment variable
@@ -4942,16 +5387,16 @@
                   <entry>STRING</entry>
                   <entry>Name with a new owner</entry>
                 </row>
-	        <row>
-		  <entry>1</entry>
-		  <entry>STRING</entry>
-		  <entry>Old owner or empty string if none</entry>
-	        </row>
-	        <row>
-		  <entry>2</entry>
-		  <entry>STRING</entry>
-		  <entry>New owner or empty string if none</entry>
-	        </row>
+                <row>
+                  <entry>1</entry>
+                  <entry>STRING</entry>
+                  <entry>Old owner or empty string if none</entry>
+                </row>
+                <row>
+                  <entry>2</entry>
+                  <entry>STRING</entry>
+                  <entry>New owner or empty string if none</entry>
+                </row>
               </tbody>
             </tgroup>
           </informaltable>
@@ -5051,11 +5496,11 @@
                   <entry>STRING</entry>
                   <entry>Name of the service to start</entry>
                 </row>
-	        <row>
-		  <entry>1</entry>
-		  <entry>UINT32</entry>
-		  <entry>Flags (currently not used)</entry>
-	        </row>
+                <row>
+                  <entry>1</entry>
+                  <entry>UINT32</entry>
+                  <entry>Flags (currently not used)</entry>
+                </row>
               </tbody>
             </tgroup>
           </informaltable>
@@ -5093,7 +5538,7 @@
                 </row>
               </thead>
               <tbody>
-	        <row>
+                <row>
                   <entry>DBUS_START_REPLY_SUCCESS</entry>
                   <entry>1</entry>
                   <entry>The service was successfully started.</entry>
@@ -5385,23 +5830,151 @@
                 <entry>The numeric Unix user ID, as defined by POSIX</entry>
               </row>
               <row>
-                <entry>UnixProcessID</entry>
+                <entry>ProcessID</entry>
                 <entry>UINT32</entry>
-                <entry>The numeric Unix process ID, as defined by POSIX</entry>
+                <entry>The numeric process ID, on platforms that have
+                  this concept. On Unix, this is the process ID defined by
+                  POSIX.</entry>
               </row>
-	      <row>
-		<entry>SmackContext</entry>
-		<entry>STRING</entry>
+              <row>
+                <entry>SmackContext</entry>
+                <entry>STRING</entry>
 		<entry>This is a ascii string that defines the Smack context
-		of the process that owns the connection.  Smack is a Manditory
+		of the process that owns the connection. Smack is a Manditory
 		Access Control framework, that is part of the Linux kernel.
 		</entry>
-	      </row>
+              </row>
             </tbody>
           </tgroup>
         </informaltable>
-       </para>
+      </para>
+
+        <para>
+          This method was added in D-Bus 1.7 to reduce the round-trips
+          required to list a process's credentials. In older versions, calling
+          this method will fail: applications should recover by using the
+          separate methods such as
+          <xref linkend="bus-messages-get-connection-unix-user"/>
+          instead.
+        </para>
       </sect3>
+
+      <sect3 id="bus-messages-get-adt-audit-session-data">
+        <title><literal>org.freedesktop.DBus.GetAdtAuditSessionData</literal></title>
+        <para>
+          As a method:
+          <programlisting>
+            ARRAY of BYTE GetAdtAuditSessionData (in STRING bus_name)
+          </programlisting>
+          Message arguments:
+          <informaltable>
+            <tgroup cols="3">
+              <thead>
+                <row>
+                  <entry>Argument</entry>
+                  <entry>Type</entry>
+                  <entry>Description</entry>
+                </row>
+              </thead>
+              <tbody>
+                <row>
+                  <entry>0</entry>
+                  <entry>STRING</entry>
+                  <entry>Unique or well-known bus name of the connection to
+                    query, such as <literal>:12.34</literal> or
+                    <literal>com.example.tea</literal></entry>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
+          Reply arguments:
+          <informaltable>
+            <tgroup cols="3">
+              <thead>
+                <row>
+                  <entry>Argument</entry>
+                  <entry>Type</entry>
+                  <entry>Description</entry>
+                </row>
+              </thead>
+              <tbody>
+                <row>
+                  <entry>0</entry>
+                  <entry>ARRAY of BYTE</entry>
+                  <entry>auditing data as returned by
+                    adt_export_session_data()</entry>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
+          Returns auditing data used by Solaris ADT, in an unspecified
+          binary format. If you know what this means, please contribute
+          documentation via the D-Bus bug tracking system.
+          This method is on the core DBus interface for historical reasons;
+          the same information should be made available via
+          <xref linkend="bus-messages-get-connection-credentials"/>
+          in future.
+        </para>
+      </sect3>
+
+      <sect3 id="bus-messages-get-connection-selinux-security-context">
+        <title><literal>org.freedesktop.DBus.GetConnectionSELinuxSecurityContext</literal></title>
+        <para>
+          As a method:
+          <programlisting>
+            ARRAY of BYTE GetConnectionSELinuxSecurityContext (in STRING bus_name)
+          </programlisting>
+          Message arguments:
+          <informaltable>
+            <tgroup cols="3">
+              <thead>
+                <row>
+                  <entry>Argument</entry>
+                  <entry>Type</entry>
+                  <entry>Description</entry>
+                </row>
+              </thead>
+              <tbody>
+                <row>
+                  <entry>0</entry>
+                  <entry>STRING</entry>
+                  <entry>Unique or well-known bus name of the connection to
+                    query, such as <literal>:12.34</literal> or
+                    <literal>com.example.tea</literal></entry>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
+          Reply arguments:
+          <informaltable>
+            <tgroup cols="3">
+              <thead>
+                <row>
+                  <entry>Argument</entry>
+                  <entry>Type</entry>
+                  <entry>Description</entry>
+                </row>
+              </thead>
+              <tbody>
+                <row>
+                  <entry>0</entry>
+                  <entry>ARRAY of BYTE</entry>
+                  <entry>some sort of string of bytes, not necessarily UTF-8,
+                    not including '\0'</entry>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
+          Returns the security context used by SELinux, in an unspecified
+          format. If you know what this means, please contribute
+          documentation via the D-Bus bug tracking system.
+          This method is on the core DBus interface for historical reasons;
+          the same information should be made available via
+          <xref linkend="bus-messages-get-connection-credentials"/>
+          in future.
+        </para>
+      </sect3>
+
 
       <sect3 id="bus-messages-add-match">
         <title><literal>org.freedesktop.DBus.AddMatch</literal></title>
@@ -5430,8 +6003,8 @@
             </tgroup>
           </informaltable>
         Adds a match rule to match messages going through the message bus (see <xref linkend='message-bus-routing-match-rules'/>). 
-	If the bus does not have enough resources the <literal>org.freedesktop.DBus.Error.OOM</literal>
-	error is returned.
+        If the bus does not have enough resources the <literal>org.freedesktop.DBus.Error.OOM</literal>
+        error is returned.
        </para>
       </sect3>
       <sect3 id="bus-messages-remove-match">
@@ -5461,8 +6034,8 @@
             </tgroup>
           </informaltable>
         Removes the first rule that matches (see <xref linkend='message-bus-routing-match-rules'/>). 
-	If the rule is not found the <literal>org.freedesktop.DBus.Error.MatchRuleNotFound</literal>
-	error is returned.
+        If the rule is not found the <literal>org.freedesktop.DBus.Error.MatchRuleNotFound</literal>
+        error is returned.
        </para>
       </sect3>
 
@@ -5500,6 +6073,96 @@
         by org.freedesktop.DBus.Peer.GetMachineId().
         For a desktop session bus, the bus ID can be used as a way to uniquely identify a user's session.
         </para>
+      </sect3>
+
+      <sect3 id="bus-messages-become-monitor">
+        <title><literal>org.freedesktop.DBus.Monitoring.BecomeMonitor</literal></title>
+        <para>
+          As a method:
+          <programlisting>
+            BecomeMonitor (in ARRAY of STRING rule, in UINT32 flags)
+          </programlisting>
+          Message arguments:
+          <informaltable>
+            <tgroup cols="3">
+              <thead>
+                <row>
+                  <entry>Argument</entry>
+                  <entry>Type</entry>
+                  <entry>Description</entry>
+                </row>
+              </thead>
+              <tbody>
+                <row>
+                  <entry>0</entry>
+                  <entry>ARRAY of STRING</entry>
+                  <entry>Match rules to add to the connection</entry>
+                </row>
+                <row>
+                  <entry>1</entry>
+                  <entry>UINT32</entry>
+                  <entry>Not used, must be 0</entry>
+                </row>
+              </tbody>
+            </tgroup>
+          </informaltable>
+        </para>
+
+        <para>
+          Converts the connection into a <emphasis>monitor
+            connection</emphasis> which can be used as a debugging/monitoring
+          tool. Only a user who is privileged on this
+          bus (by some implementation-specific definition) may create
+          monitor connections<footnote>
+            <para>
+              In the reference implementation,
+              the default configuration is that each user (identified by
+              numeric user ID) may monitor their own session bus,
+              and the root user (user ID zero) may monitor the
+              system bus.
+            </para>
+          </footnote>.
+       </para>
+
+       <para>
+         Monitor connections lose all their bus names, including the unique
+         connection name, and all their match rules. Sending messages on a
+         monitor connection is not allowed: applications should use a private
+         connection for monitoring.
+       </para>
+
+       <para>
+         Monitor connections may receive all messages, even messages that
+         should only have gone to some other connection ("eavesdropping").
+         The first argument is a list of match rules, which replace any
+         match rules that were previously active for this connection.
+         These match rules are always treated as if they contained the
+         special <literal>eavesdrop='true'</literal> member.
+       </para>
+
+       <para>
+         As a special case, an empty list of match rules (which would
+         otherwise match nothing, making the monitor useless) is treated
+         as a shorthand for matching all messages.
+       </para>
+
+       <para>
+         The second argument might be used for flags to influence the
+         behaviour of the monitor connection in future D-Bus versions.
+       </para>
+
+       <para>
+         Message bus implementations should attempt to minimize the
+         side-effects of monitoring — in particular, unlike ordinary
+         eavesdropping, monitoring the system bus does not require the
+         access control rules to be relaxed, which would change the set
+         of messages that can be delivered to their (non-monitor)
+         destinations. However, it is unavoidable that monitoring
+         will increase the message bus's resource consumption. In
+         edge cases where there was barely enough time or memory without
+         monitoring, this might result in message deliveries failing
+         when they would otherwise have succeeded.
+       </para>
       </sect3>
 
     </sect2>
@@ -5606,7 +6269,7 @@
 
     <glossentry id="one-to-one"><glossterm>One-to-One</glossterm>
       <glossdef>
-	<para>
+        <para>
           An application talking directly to another application, without going
           through a message bus. One-to-one connections may be "peer to peer" or
           "client to server." The D-Bus protocol has no concept of client
@@ -5645,9 +6308,9 @@
           A service is an executable that can be launched by the bus daemon.
           Services normally guarantee some particular features, for example they
           may guarantee that they will request a specific name such as
-          "org.freedesktop.Screensaver", have a singleton object
-          "/org/freedesktop/Application", and that object will implement the
-          interface "org.freedesktop.ScreensaverControl".
+          "com.example.Screensaver", have a singleton object
+          "/com/example/Application", and that object will implement the
+          interface "com.example.Screensaver.Control".
         </para>
       </glossdef>
     </glossentry>

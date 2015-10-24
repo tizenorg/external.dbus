@@ -23,9 +23,6 @@
   <!-- We use system service launching using a helper -->
   <standard_system_servicedirs/>
 
-  <!-- SLP services used to be installed under following location -->
-  <servicedir>/usr/share/dbus-1/services</servicedir>
-
   <!-- This is a setuid helper that is used to launch system services -->
   <servicehelper>@DBUS_LIBEXECDIR@/dbus-daemon-launch-helper</servicehelper>
 
@@ -69,6 +66,20 @@
     <deny send_destination="org.freedesktop.DBus"
           send_interface="org.freedesktop.DBus"
           send_member="UpdateActivationEnvironment"/>
+    <deny send_destination="org.freedesktop.DBus"
+          send_interface="org.freedesktop.systemd1.Activator"/>
+  </policy>
+
+  <!-- Only systemd, which runs as root, may report activation failures. -->
+  <policy user="root">
+    <allow send_destination="org.freedesktop.DBus"
+           send_interface="org.freedesktop.systemd1.Activator"/>
+  </policy>
+
+  <!-- root may monitor the system bus. -->
+  <policy user="root">
+    <allow send_destination="org.freedesktop.DBus"
+           send_interface="org.freedesktop.DBus.Monitoring"/>
   </policy>
 
   <!-- Config files are placed here that among other things, punch 

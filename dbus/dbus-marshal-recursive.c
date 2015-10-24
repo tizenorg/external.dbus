@@ -941,6 +941,8 @@ _dbus_type_reader_read_fixed_multi (const DBusTypeReader  *reader,
 
   alignment = _dbus_type_get_alignment (element_type);
 
+  _dbus_return_if_fail(alignment != 0);
+
   _dbus_assert (reader->value_pos >= reader->u.array.start_pos);
 
   total_len = array_reader_get_array_len (reader);
@@ -991,7 +993,7 @@ _dbus_type_reader_recurse (DBusTypeReader *reader,
   int t;
 
   t = _dbus_first_type_in_signature (reader->type_str, reader->type_pos);
-
+  sub->klass = NULL;
   switch (t)
     {
     case DBUS_TYPE_STRUCT:
@@ -1028,10 +1030,11 @@ _dbus_type_reader_recurse (DBusTypeReader *reader,
       _dbus_assert_not_reached ("don't yet handle recursing into this type");
     }
 
-  _dbus_assert (sub->klass == all_reader_classes[sub->klass->id]);
-
-  (* sub->klass->recurse) (sub, reader);
-
+  if (sub->klass != NULL)
+  {
+    _dbus_assert (sub->klass == all_reader_classes[sub->klass->id]);
+	(* sub->klass->recurse) (sub, reader);
+  }
 #if RECURSIVE_MARSHAL_READ_TRACE
   _dbus_verbose ("  type reader %p RECURSED type_pos = %d value_pos = %d remaining sig '%s'\n",
                  sub, sub->type_pos, sub->value_pos,

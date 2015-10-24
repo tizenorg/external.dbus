@@ -2,6 +2,7 @@
 /* bus.c  message bus context object
  *
  * Copyright (C) 2003, 2004 Red Hat, Inc.
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  *
@@ -39,6 +40,12 @@
 #include <dbus/dbus-hash.h>
 #include <dbus/dbus-credentials.h>
 #include <dbus/dbus-internals.h>
+#include <dbus/dbus-server-protected.h>
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "kdbus-d.h"
+#include <stdlib.h>
+#endif
 
 #ifdef DBUS_CYGWIN
 #include <signal.h>
@@ -63,11 +70,16 @@ struct BusContext
   BusPolicy *policy;
   BusMatchmaker *matchmaker;
   BusLimits limits;
+  DBusRLimit *initial_fd_limit;
   unsigned int fork : 1;
   unsigned int syslog : 1;
   unsigned int keep_umask : 1;
   unsigned int allow_anonymous : 1;
   unsigned int systemd_activation : 1;
+  dbus_bool_t watches_enabled;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  DBusConnection *myKdbusConnection;  //todo maybe can be rafctored and removed
+#endif
 };
 
 static dbus_int32_t server_data_slot = -1;
@@ -123,7 +135,10 @@ remove_server_watch (DBusWatch  *watch,
 
   context = server_get_context (server);
 
-  _dbus_loop_remove_watch (context->loop, watch);
+  if (context != NULL)
+    _dbus_loop_remove_watch (context->loop, watch);
+  else
+    _dbus_verbose ("Unable to remove server watch. Improper server context.");
 }
 
 static void
@@ -135,6 +150,11 @@ toggle_server_watch (DBusWatch  *watch,
 
   context = server_get_context (server);
 
+  if (context == NULL)
+    {
+      _dbus_verbose ("unable to get server context\n");
+      return;
+    }
   _dbus_loop_toggle_watch (context->loop, watch);
 }
 
@@ -159,7 +179,10 @@ remove_server_timeout (DBusTimeout *timeout,
 
   context = server_get_context (server);
 
-  _dbus_loop_remove_timeout (context->loop, timeout);
+  if (context != NULL)
+    _dbus_loop_remove_timeout (context->loop, timeout);
+  else
+    _dbus_verbose("Unable to remove server timeout. Improper server context.");
 }
 
 static void
@@ -261,6 +284,60 @@ setup_server (BusContext *context,
   return TRUE;
 }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusConnection * bus_context_get_daemon_connection(BusContext  *context)
+{
+  return context->myKdbusConnection;
+}
+
+#endif
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+static int
+init_server_for_kdbus (BusContext  *context,
+                       const char  *address,
+                       DBusError   *error)
+{
+  DBusBusType type = DBUS_BUS_STARTER;
+  DBusServer* server;
+  char* bus_address;
+
+  if (context->type != NULL)
+    {
+      if (!strcmp (context->type, "system"))
+        type = DBUS_BUS_SYSTEM;
+      else if (!strcmp (context->type, "session"))
+        type = DBUS_BUS_SESSION;
+    }
+
+  bus_address = make_kdbus_bus (type, address, error);
+  if (bus_address == NULL)
+    return -1;
+
+  server = empty_server_init (bus_address);
+  if (server == NULL)
+    {
+      free (bus_address);
+      return -1;
+    }
+
+  if (!_dbus_list_append (&context->servers, server))
+    {
+      free (bus_address);
+      return -2;
+    }
+
+  context->myKdbusConnection = daemon_as_client (bus_address, error);
+  if (context->myKdbusConnection == NULL)
+    {
+      free (bus_address);
+      return -1;
+    }
+
+  return 0;
+}
+#endif
+
 /* This code only gets executed the first time the
  * config files are parsed.  It is not executed
  * when config files are reloaded.
@@ -287,7 +364,7 @@ process_config_first_time_only (BusContext       *context,
   auth_mechanisms = NULL;
   pidfile = NULL;
 
-  _dbus_init_system_log ();
+  _dbus_init_system_log (TRUE);
 
   if (flags & BUS_CONTEXT_FLAG_SYSTEMD_ACTIVATION)
     context->systemd_activation = TRUE;
@@ -423,49 +500,81 @@ process_config_first_time_only (BusContext       *context,
 
   if (address)
     {
-      DBusServer *server;
-
-      server = dbus_server_listen (_dbus_string_get_const_data(address), error);
-      if (server == NULL)
+#ifdef ENABLE_KDBUS_TRANSPORT
+      if(!strncmp(_dbus_string_get_const_data(address), "kernel:", strlen("kernel:")))
         {
-          _DBUS_ASSERT_ERROR_IS_SET (error);
-          goto failed;
-        }
-      else if (!setup_server (context, server, auth_mechanisms, error))
-        {
-          _DBUS_ASSERT_ERROR_IS_SET (error);
-          goto failed;
-        }
+          int ret;
 
-      if (!_dbus_list_append (&context->servers, server))
-        goto oom;
+          ret = init_server_for_kdbus (context, _dbus_string_get_const_data (address), error);
+
+          if (ret == -1)
+            goto failed;
+          else if (ret == -2)
+            goto oom;
+        }
+      else
+#endif
+        {
+          DBusServer *server;
+
+          server = dbus_server_listen (_dbus_string_get_const_data(address), error);
+          if (server == NULL)
+          {
+            _DBUS_ASSERT_ERROR_IS_SET (error);
+            goto failed;
+          }
+          else if (!setup_server (context, server, auth_mechanisms, error))
+          {
+            _DBUS_ASSERT_ERROR_IS_SET (error);
+            goto failed;
+          }
+
+          if (!_dbus_list_append (&context->servers, server))
+          goto oom;
+        }
     }
   else
     {
       addresses = bus_config_parser_get_addresses (parser);
 
       link = _dbus_list_get_first_link (addresses);
-      while (link != NULL)
+#ifdef ENABLE_KDBUS_TRANSPORT
+	  if (!strncmp(link->data, "kernel:", strlen("kernel:")))
         {
-          DBusServer *server;
+          int ret;
 
-          server = dbus_server_listen (link->data, error);
-          if (server == NULL)
-            {
-              _DBUS_ASSERT_ERROR_IS_SET (error);
-              goto failed;
-            }
-          else if (!setup_server (context, server, auth_mechanisms, error))
-            {
-              _DBUS_ASSERT_ERROR_IS_SET (error);
-              goto failed;
-            }
+          ret = init_server_for_kdbus (context, link->data, error);
 
-          if (!_dbus_list_append (&context->servers, server))
+          if (ret == -1)
+            goto failed;
+          else if (ret == -2)
             goto oom;
-
-          link = _dbus_list_get_next_link (addresses, link);
         }
+      else
+#endif
+        {
+          while (link != NULL)
+            {
+              DBusServer *server;
+
+              server = dbus_server_listen (link->data, error);
+              if (server == NULL)
+                {
+                  _DBUS_ASSERT_ERROR_IS_SET (error);
+                  goto failed;
+                }
+              else if (!setup_server (context, server, auth_mechanisms, error))
+                {
+                  _DBUS_ASSERT_ERROR_IS_SET (error);
+                  goto failed;
+                }
+
+              if (!_dbus_list_append (&context->servers, server))
+                goto oom;
+
+              link = _dbus_list_get_next_link (addresses, link);
+            }
+       }
     }
 
   context->fork = bus_config_parser_get_fork (parser);
@@ -525,6 +634,18 @@ process_config_every_time (BusContext      *context,
     bus_policy_unref (context->policy);
   context->policy = bus_config_parser_steal_policy (parser);
   _dbus_assert (context->policy != NULL);
+
+  /* context->connections is NULL when creating new BusContext */
+  if (context->connections)
+    {
+      _dbus_verbose ("Reload policy rules for completed connections\n");
+      retval = bus_connections_reload_policy (context->connections, error);
+      if (!retval)
+        {
+          _DBUS_ASSERT_ERROR_IS_SET (error);
+          goto failed;
+        }
+    }
 
   /* We have to build the address backward, so that
    * <listen> later in the config file have priority
@@ -645,19 +766,38 @@ oom:
 static void
 raise_file_descriptor_limit (BusContext      *context)
 {
+#ifdef DBUS_UNIX
+  DBusError error = DBUS_ERROR_INIT;
 
-  /* I just picked this out of thin air; we need some extra
-   * descriptors for things like any internal pipes we create,
-   * inotify, connections to SELinux, etc.
+  /* we only do this once */
+  if (context->initial_fd_limit != NULL)
+    return;
+
+  context->initial_fd_limit = _dbus_rlimit_save_fd_limit (&error);
+
+  if (context->initial_fd_limit == NULL)
+    {
+      bus_context_log (context, DBUS_SYSTEM_LOG_INFO,
+                       "%s: %s", error.name, error.message);
+      dbus_error_free (&error);
+      return;
+    }
+
+  /* We used to compute a suitable rlimit based on the configured number
+   * of connections, but that breaks down as soon as we allow fd-passing,
+   * because each connection is allowed to pass 64 fds to us, and if
+   * they all did, we'd hit kernel limits. We now hard-code 64k as a
+   * good limit, like systemd does: that's enough to avoid DoS from
+   * anything short of multiple uids conspiring against us.
    */
-  unsigned int arbitrary_extra_fds = 32;
-  unsigned int limit;
-
-  limit = context->limits.max_completed_connections +
-    context->limits.max_incomplete_connections
-    + arbitrary_extra_fds;
-
-  _dbus_request_file_descriptor_limit (limit);
+  if (!_dbus_rlimit_raise_fd_limit_if_privileged (65536, &error))
+    {
+      bus_context_log (context, DBUS_SYSTEM_LOG_INFO,
+                       "%s: %s", error.name, error.message);
+      dbus_error_free (&error);
+      return;
+    }
+#endif
 }
 
 static dbus_bool_t
@@ -731,6 +871,10 @@ bus_context_new (const DBusString *config_file,
     }
   context->refcount = 1;
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  context->myKdbusConnection = NULL;
+#endif
+
   _dbus_generate_uuid (&context->uuid);
 
   if (!_dbus_string_copy_data (config_file, &context->config_file))
@@ -745,6 +889,8 @@ bus_context_new (const DBusString *config_file,
       BUS_SET_OOM (error);
       goto failed;
     }
+
+  context->watches_enabled = TRUE;
 
   context->registry = bus_registry_new (context);
   if (context->registry == NULL)
@@ -894,7 +1040,7 @@ bus_context_new (const DBusString *config_file,
 
   if (!bus_selinux_full_init ())
     {
-      bus_context_log (context, DBUS_SYSTEM_LOG_FATAL, "SELinux enabled but AVC initialization failed; check system log\n");
+      bus_context_log (context, DBUS_SYSTEM_LOG_FATAL, "SELinux enabled but D-Bus initialization failed; check system log\n");
     }
 
   if (!process_config_postinit (context, parser, error))
@@ -927,6 +1073,41 @@ bus_context_new (const DBusString *config_file,
     }
 
   dbus_server_free_data_slot (&server_data_slot);
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(context->myKdbusConnection)
+  {
+	  DBusString unique_name;
+
+	  if(!bus_connections_setup_connection(context->connections, context->myKdbusConnection))
+	  {
+          _dbus_verbose ("Bus connections setup connection failed for myKdbusConnection!\n");
+          dbus_connection_close (context->myKdbusConnection);
+          dbus_connection_unref (context->myKdbusConnection);
+          goto failed;
+	  }
+
+	  dbus_connection_unref (context->myKdbusConnection);
+	  dbus_connection_set_route_peer_messages (context->myKdbusConnection, FALSE);
+	  _dbus_string_init_const (&unique_name, dbus_bus_get_unique_name(context->myKdbusConnection));
+	  if(!bus_connection_complete (context->myKdbusConnection, &unique_name, error))
+	  {
+		  _dbus_verbose ("Bus connection complete failed for myKdbusConnection!\n");
+		  goto failed;
+	  }
+
+	  if(!register_daemon_name(context->myKdbusConnection))
+	  {
+	      _dbus_verbose ("Registering org.freedesktop.DBus name for daemon failed!\n");
+	      goto failed;
+	  }
+	  if(!register_kdbus_starters(context->myKdbusConnection))
+	  {
+          _dbus_verbose ("Registering kdbus starters for dbus activatable names failed!\n");
+          goto failed;
+	  }
+  }
+#endif
 
   return context;
 
@@ -979,6 +1160,19 @@ bus_context_reload_config (BusContext *context,
       _DBUS_ASSERT_ERROR_IS_SET (error);
       goto failed;
     }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(context->myKdbusConnection)
+  {
+      if(!update_kdbus_starters(context->myKdbusConnection))
+      {
+          _dbus_verbose ("Update kdbus starters for dbus activatable names failed.\n");
+          _DBUS_ASSERT_ERROR_IS_SET (error);
+          goto failed;
+      }
+  }
+#endif
+
   ret = TRUE;
 
   bus_context_log (context, DBUS_SYSTEM_LOG_INFO, "Reloaded configuration");
@@ -1114,6 +1308,10 @@ bus_context_unref (BusContext *context)
 
           dbus_free (context->pidfile);
 	}
+
+      if (context->initial_fd_limit)
+        _dbus_rlimit_free (context->initial_fd_limit);
+
       dbus_free (context);
 
       dbus_server_free_data_slot (&server_data_slot);
@@ -1225,6 +1423,12 @@ bus_context_get_auth_timeout (BusContext *context)
 }
 
 int
+bus_context_get_pending_fd_timeout (BusContext *context)
+{
+  return context->limits.pending_fd_timeout;
+}
+
+int
 bus_context_get_max_completed_connections (BusContext *context)
 {
   return context->limits.max_completed_connections;
@@ -1271,6 +1475,19 @@ bus_context_get_reply_timeout (BusContext *context)
 {
   return context->limits.reply_timeout;
 }
+
+DBusRLimit *
+bus_context_get_initial_fd_limit (BusContext *context)
+{
+  return context->initial_fd_limit;
+}
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+dbus_bool_t bus_context_is_kdbus(BusContext* context)
+{
+	return context->myKdbusConnection != NULL;
+}
+#endif
 
 void
 bus_context_log (BusContext *context, DBusSystemLogSeverity severity, const char *msg, ...) _DBUS_GNUC_PRINTF (3, 4);
@@ -1414,6 +1631,11 @@ bus_context_check_security_policy (BusContext     *context,
   dbus_bool_t log;
   int type;
   dbus_bool_t requested_reply;
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(context))
+    return TRUE;
+#endif
 
   type = dbus_message_get_type (message);
   dest = dbus_message_get_destination (message);
@@ -1608,7 +1830,7 @@ bus_context_check_security_policy (BusContext     *context,
       complain_about_message (context, DBUS_ERROR_ACCESS_DENIED,
           "Rejected receive message", toggles,
           message, sender, proposed_recipient, requested_reply,
-          (addressed_recipient == proposed_recipient), NULL);
+          (addressed_recipient == proposed_recipient), error);
       _dbus_verbose ("security policy disallowing message due to recipient policy\n");
       return FALSE;
     }
@@ -1645,4 +1867,37 @@ bus_context_check_security_policy (BusContext     *context,
 
   _dbus_verbose ("security policy allowing message\n");
   return TRUE;
+}
+
+void
+bus_context_check_all_watches (BusContext *context)
+{
+  DBusList *link;
+  dbus_bool_t enabled = TRUE;
+
+  if (bus_connections_get_n_incomplete (context->connections) >=
+      bus_context_get_max_incomplete_connections (context))
+    {
+      enabled = FALSE;
+    }
+
+  if (context->watches_enabled == enabled)
+    return;
+
+  context->watches_enabled = enabled;
+
+  for (link = _dbus_list_get_first_link (&context->servers);
+       link != NULL;
+       link = _dbus_list_get_next_link (&context->servers, link))
+    {
+      /* A BusContext might contains several DBusServer (if there are
+       * several <listen> configuration items) and a DBusServer might
+       * contain several DBusWatch in its DBusWatchList (if getaddrinfo
+       * returns several addresses on a dual IPv4-IPv6 stack or if
+       * systemd passes several fds).
+       * We want to enable/disable them all.
+       */
+      DBusServer *server = link->data;
+      _dbus_server_toggle_all_watches (server, enabled);
+    }
 }

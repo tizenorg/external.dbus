@@ -18,6 +18,7 @@ DBUS_LAUNCHER_LIBS = \
 
 AM_CPPFLAGS = \
 	-I$(top_srcdir) \
+	-I$(top_srcdir)/dbus \
 	$(XML_CFLAGS) \
 	-DDBUS_SYSTEM_CONFIG_FILE=\""$(configdir)/system.conf"\" \
 	-DDBUS_COMPILATION \
@@ -44,12 +45,7 @@ agentdir=$(LAUNCHD_AGENT_DIR)
 agent_DATA=org.freedesktop.dbus-session.plist
 endif
 
-if DBUS_USE_LIBXML
-XML_SOURCES=config-loader-libxml.c
-endif
-if DBUS_USE_EXPAT
 XML_SOURCES=config-loader-expat.c
-endif
 
 if DBUS_BUS_ENABLE_KQUEUE
 DIR_WATCH_SOURCE=dir-watch-kqueue.c
@@ -57,11 +53,7 @@ else
 if DBUS_BUS_ENABLE_INOTIFY
 DIR_WATCH_SOURCE=dir-watch-inotify.c
 else
-if DBUS_BUS_ENABLE_DNOTIFY_ON_LINUX
-DIR_WATCH_SOURCE=dir-watch-dnotify.c
-else
 DIR_WATCH_SOURCE=dir-watch-default.c
-endif
 endif
 endif
 
@@ -95,8 +87,8 @@ BUS_SOURCES=					\
 	services.h				\
 	signals.c				\
 	signals.h				\
-	smack.c                                 \
-	smack.h                                 \
+	smack.c					\
+	smack.h					\
 	stats.c					\
 	stats.h					\
 	test.c					\
@@ -105,6 +97,13 @@ BUS_SOURCES=					\
 	utils.h					\
 	$(XML_SOURCES)
 
+if ENABLE_KDBUS_TRANSPORT
+BUS_SOURCES+= 				\
+	kdbus-d.c				\
+	kdbus-d.h
+endif
+
+
 dbus_daemon_SOURCES=				\
 	$(BUS_SOURCES)				\
 	main.c
@@ -112,7 +111,8 @@ dbus_daemon_SOURCES=				\
 dbus_daemon_LDADD=					\
 	$(top_builddir)/dbus/libdbus-internal.la	\
 	$(EFENCE)					\
-	$(DBUS_BUS_LIBS)
+	$(DBUS_BUS_LIBS) \
+	$(SMACK_LIBS)
 
 LAUNCH_HELPER_SOURCES=				\
 	$(XML_SOURCES)				\
@@ -153,15 +153,15 @@ dbus_daemon_launch_helper_test_CPPFLAGS = \
 
 ## we build yet another binary so we can do the OOM tests
 ## DO NOT INSTALL THIS FILE
-bus_test_launch_helper_SOURCES=		\
+test_bus_launch_helper_SOURCES=		\
 	test-launch-helper.c   		\
 	$(LAUNCH_HELPER_SOURCES)
 
-bus_test_launch_helper_LDADD=		\
+test_bus_launch_helper_LDADD=		\
 	$(top_builddir)/dbus/libdbus-internal.la \
 	$(DBUS_LAUNCHER_LIBS)
 
-bus_test_launch_helper_CPPFLAGS = \
+test_bus_launch_helper_CPPFLAGS = \
 	$(AM_CPPFLAGS) \
 	-DACTIVATION_LAUNCHER_TEST	\
 	-DACTIVATION_LAUNCHER_DO_OOM
@@ -177,23 +177,23 @@ endif DBUS_UNIX
 ## compiled, so we don't put them in TESTS here; we run them in test/
 ## instead.
 
-if DBUS_BUILD_TESTS
+if DBUS_ENABLE_EMBEDDED_TESTS
 ## we use noinst_PROGRAMS not check_PROGRAMS so that we build
 ## even when not doing "make check"
 
 # run as a test by test/Makefile.am
-noinst_PROGRAMS += bus-test bus-test-system
+noinst_PROGRAMS += test-bus test-bus-system
 
 if DBUS_UNIX
 # run as a test by test/Makefile.am
-noinst_PROGRAMS += bus-test-launch-helper
+noinst_PROGRAMS += test-bus-launch-helper
 # this is used by the tests but is not,itself, a test
 noinst_PROGRAMS += dbus-daemon-launch-helper-test
 endif DBUS_UNIX
 
-endif DBUS_BUILD_TESTS
+endif DBUS_ENABLE_EMBEDDED_TESTS
 
-bus_test_system_SOURCES=			\
+test_bus_system_SOURCES=			\
 	$(XML_SOURCES)				\
 	config-parser-common.c			\
 	config-parser-common.h			\
@@ -203,13 +203,13 @@ bus_test_system_SOURCES=			\
 	utils.h					\
 	test-system.c
 
-bus_test_system_LDADD=$(top_builddir)/dbus/libdbus-internal.la $(DBUS_BUS_LIBS)
+test_bus_system_LDADD=$(top_builddir)/dbus/libdbus-internal.la $(DBUS_BUS_LIBS)
 
-bus_test_SOURCES=				\
+test_bus_SOURCES=				\
 	$(BUS_SOURCES)				\
 	test-main.c
 
-bus_test_LDADD=$(top_builddir)/dbus/libdbus-internal.la $(DBUS_BUS_LIBS)
+test_bus_LDADD=$(top_builddir)/dbus/libdbus-internal.la $(DBUS_BUS_LIBS)
 
 ## mop up the gcov files
 clean-local:
@@ -221,7 +221,11 @@ install-data-hook:
 	$(mkinstalldirs) $(DESTDIR)$(configdir)/session.d
 	$(mkinstalldirs) $(DESTDIR)$(datadir)/dbus-1/services
 	$(mkinstalldirs) $(DESTDIR)$(datadir)/dbus-1/system-services
-if HAVE_SYSTEMD
+
+# We can not enable systemd config by the cyclic dependency. But we
+# want dbus systemd service files. So the units are installed as
+# default
+#if HAVE_SYSTEMD
 # Install dbus.socket as default implementation of a D-Bus stack.
 # Deliberately not using $(LN_S) here: ln -fs is not universally portable,
 # but neither is systemd, so it's OK to assume here that ln complies with SUS.
@@ -232,7 +236,7 @@ if HAVE_SYSTEMD
 	ln -fs ../dbus.socket $(DESTDIR)$(systemdsystemunitdir)/sockets.target.wants/dbus.socket
 	$(mkinstalldirs) $(DESTDIR)$(systemdsystemunitdir)/multi-user.target.wants
 	ln -fs ../dbus.service $(DESTDIR)$(systemdsystemunitdir)/multi-user.target.wants/dbus.service
-endif
+#endif
 
 if DBUS_UNIX
 install-exec-hook:
@@ -281,7 +285,10 @@ bin_SCRIPTS= 	\
 endif
 ## Cygwin end
 
-if HAVE_SYSTEMD
+# We can not enable systemd config by the cyclic dependency. But we
+# want dbus systemd service files. So the units are installed as
+# default
+#if HAVE_SYSTEMD
 SCRIPT_IN_FILES += \
 	dbus.service.in \
 	dbus.socket.in
@@ -289,7 +296,7 @@ SCRIPT_IN_FILES += \
 systemdsystemunit_DATA = \
 	dbus.service \
 	dbus.socket
-endif
+#endif
 
 #### Extra dist
 

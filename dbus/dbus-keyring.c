@@ -80,7 +80,7 @@
  * Maximum number of keys in the keyring before
  * we just ignore the rest
  */
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 #define MAX_KEYS_IN_FILE 10
 #else
 #define MAX_KEYS_IN_FILE 256
@@ -697,10 +697,10 @@ _dbus_keyring_unref (DBusKeyring *keyring)
 
 /**
  * Creates a new keyring that lives in the ~/.dbus-keyrings directory
- * of the given user credentials. If the credentials are #NULL or
- * empty, uses those of the current process.
+ * of the user represented by @p credentials. If the @p credentials are
+ * #NULL or empty, uses those of the current process.
  *
- * @param username username to get keyring for, or #NULL
+ * @param credentials a set of credentials representing a user or #NULL
  * @param context which keyring to get
  * @param error return location for errors
  * @returns the keyring or #NULL on error
@@ -717,6 +717,13 @@ _dbus_keyring_new_for_credentials (DBusCredentials  *credentials,
   DBusCredentials *our_credentials;
   
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+
+  if (_dbus_check_setuid ())
+    {
+      dbus_set_error_const (error, DBUS_ERROR_NOT_SUPPORTED,
+                            "Unable to create DBus keyring when setuid");
+      return NULL;
+    }
   
   keyring = NULL;
   error_set = FALSE;
@@ -1016,7 +1023,7 @@ _dbus_keyring_get_hex_key (DBusKeyring       *keyring,
 
 /** @} */ /* end of exposed API */
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 #include "dbus-test.h"
 #include <stdio.h>
 
@@ -1149,5 +1156,5 @@ _dbus_keyring_test (void)
   return FALSE;
 }
 
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */
      

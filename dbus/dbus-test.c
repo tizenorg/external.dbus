@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 static void
 die (const char *failure)
 {
@@ -41,7 +41,7 @@ check_memleaks (void)
 {
   dbus_shutdown ();
 
-  printf ("%s: checking for memleaks\n", "dbus-test");
+  printf ("%s: checking for memleaks\n", "test-dbus");
   if (_dbus_get_malloc_blocks_outstanding () != 0)
     {
       _dbus_warn ("%d dbus_malloc blocks were not freed\n",
@@ -60,7 +60,7 @@ run_test (const char             *test_name,
 {
   if (!specific_test || strcmp (specific_test, test_name) == 0)
     {
-      printf ("%s: running %s tests\n", "dbus-test", test_name);
+      printf ("%s: running %s tests\n", "test-dbus", test_name);
       if (!test ())
 	die (test_name);
 
@@ -76,7 +76,7 @@ run_data_test (const char             *test_name,
 {
   if (!specific_test || strcmp (specific_test, test_name) == 0)
     {
-      printf ("%s: running %s tests\n", "dbus-test", test_name);
+      printf ("%s: running %s tests\n", "test-dbus", test_name);
       if (!test (test_data_dir))
 	die (test_name);
 
@@ -84,7 +84,7 @@ run_data_test (const char             *test_name,
     }
 }
 
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */
 
 /**
  * An exported symbol to be run in order to execute
@@ -94,11 +94,12 @@ run_data_test (const char             *test_name,
  * (with --enable-tests=no)
  *
  * @param test_data_dir the directory with test data (test/data normally)
+ * @param specific_test run specific test or #NULL to run all tests
  */
 void
 dbus_internal_do_not_use_run_tests (const char *test_data_dir, const char *specific_test)
 {
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
   if (!_dbus_threads_init_debug ())
     die ("debug threads init");
   
@@ -164,7 +165,7 @@ dbus_internal_do_not_use_run_tests (const char *test_data_dir, const char *speci
   
   run_data_test ("auth", specific_test, _dbus_auth_test, test_data_dir);
 
-  printf ("%s: completed successfully\n", "dbus-test");
+  printf ("%s: completed successfully\n", "test-dbus");
 #else
   printf ("Not compiled with unit tests, not running any\n");
 #endif

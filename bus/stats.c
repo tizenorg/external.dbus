@@ -1,6 +1,7 @@
 /* stats.c - statistics from the bus driver
  *
  * Copyright © 2011-2012 Nokia Corporation
+ * Copyright © 2012-2013 Collabora Ltd.
  *
  * Licensed under the Academic Free License version 2.1
  *
@@ -28,6 +29,7 @@
 #include <dbus/dbus-connection-internal.h>
 
 #include "connection.h"
+#include "driver.h"
 #include "services.h"
 #include "utils.h"
 
@@ -39,6 +41,7 @@ bus_stats_handle_get_stats (DBusConnection *connection,
                             DBusMessage    *message,
                             DBusError      *error)
 {
+  BusContext *context;
   BusConnections *connections;
   DBusMessage *reply = NULL;
   DBusMessageIter iter, arr_iter;
@@ -47,7 +50,11 @@ bus_stats_handle_get_stats (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  connections = bus_transaction_get_connections (transaction);
+  if (!bus_driver_check_message_is_for_us (message, error))
+    return FALSE;
+
+  context = bus_transaction_get_context (transaction);
+  connections = bus_context_get_connections (context);
 
   reply = _dbus_asv_new_method_return (message, &iter, &arr_iter);
 
@@ -59,9 +66,9 @@ bus_stats_handle_get_stats (DBusConnection *connection,
   _dbus_list_get_stats (&in_use, &in_free_list, &allocated);
 
   if (!_dbus_asv_add_uint32 (&arr_iter, "Serial", stats_serial++) ||
-      !asv_add_uint32 (&arr_iter, "ListMemPoolUsedBytes", in_use) ||
-      !asv_add_uint32 (&arr_iter, "ListMemPoolCachedBytes", in_free_list) ||
-      !asv_add_uint32 (&arr_iter, "ListMemPoolAllocatedBytes", allocated))
+      !_dbus_asv_add_uint32 (&arr_iter, "ListMemPoolUsedBytes", in_use) ||
+      !_dbus_asv_add_uint32 (&arr_iter, "ListMemPoolCachedBytes", in_free_list) ||
+      !_dbus_asv_add_uint32 (&arr_iter, "ListMemPoolAllocatedBytes", allocated))
     {
       _dbus_asv_abandon (&iter, &arr_iter);
       goto oom;
@@ -128,6 +135,9 @@ bus_stats_handle_get_connection_stats (DBusConnection *caller_connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
+  if (!bus_driver_check_message_is_for_us (message, error))
+    return FALSE;
+
   registry = bus_connection_get_registry (caller_connection);
 
   if (! dbus_message_get_args (message, error,
@@ -164,7 +174,7 @@ bus_stats_handle_get_connection_stats (DBusConnection *caller_connection,
         bus_connection_get_n_services_owned (stats_connection)) ||
       !_dbus_asv_add_uint32 (&arr_iter, "PeakBusNames",
         bus_connection_get_peak_bus_names (stats_connection)) ||
-      !_dbus_asv_add_uint32 (&arr_iter, "UniqueName",
+      !_dbus_asv_add_string (&arr_iter, "UniqueName",
         bus_connection_get_name (stats_connection)))
     {
       _dbus_asv_abandon (&iter, &arr_iter);

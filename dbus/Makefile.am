@@ -12,6 +12,10 @@ AM_CPPFLAGS = \
 	-DDBUS_SESSION_CONFIG_FILE=\""$(configdir)/session.conf"\" \
 	$(NULL)
 
+# On Linux with glibc 2.17, sd-daemon.c support for POSIX message queues
+# results in an otherwise unnecessary dependency on librt. Disable it.
+AM_CPPFLAGS += -DSD_DAEMON_DISABLE_MQ
+
 # if assertions are enabled, improve backtraces
 AM_LDFLAGS = @R_DYNAMIC_LDFLAG@
 
@@ -35,7 +39,7 @@ dbus_res_ldflag = -Wl,$(dbus_res)
 no_undefined = -no-undefined
 export_symbols =
 
-libdbus_1_la_DEPENDENCIES = $(dbus_res)
+EXTRA_libdbus_1_la_DEPENDENCIES = $(dbus_res)
 intllibs =
 
 else
@@ -107,6 +111,16 @@ DBUS_SHARED_arch_sources = 			\
 	sd-daemon.c                             \
 	sd-daemon.h
 
+if ENABLE_KDBUS_TRANSPORT
+DBUS_SHARED_arch_sources += \
+    dbus-transport-kdbus.c  \
+    dbus-transport-kdbus.h  \
+    kdbus-common.c          \
+    kdbus-common.h          \
+    dbus-signals.c          \
+    dbus-signals.h
+endif
+
 DBUS_UTIL_arch_sources = 			\
 	dbus-sysdeps-util-unix.c		\
 	dbus-userdb-util.c			\
@@ -135,7 +149,6 @@ dbusinclude_HEADERS=				\
 	dbus-syntax.h				\
 	dbus-threads.h				\
 	dbus-types.h
-
 
 nodist_dbusarchinclude_HEADERS=			\
 	dbus-arch-deps.h
@@ -227,6 +240,10 @@ DBUS_SHARED_SOURCES=				\
 	dbus-sysdeps.h				\
 	dbus-valgrind-internal.h
 
+if ENABLE_KDBUS_TRANSPORT
+DBUS_SHARED_SOURCES += dbus-string-util.c
+endif
+
 ### source code that is generic utility functionality used
 ### by the bus daemon or test apps, but is NOT included
 ### in the D-Bus client library (all symbols in here
@@ -254,10 +271,13 @@ DBUS_UTIL_SOURCES=				\
 	dbus-socket-set.c			\
 	dbus-socket-set-poll.c			\
 	dbus-spawn.h				\
-	dbus-string-util.c			\
 	dbus-sysdeps-util.c			\
 	dbus-test.c				\
 	dbus-test.h
+
+if !ENABLE_KDBUS_TRANSPORT
+DBUS_UTIL_SOURCES += dbus-string-util.c
+endif
 
 libdbus_1_la_SOURCES=				\
 	$(DBUS_LIB_SOURCES)			\
@@ -279,7 +299,8 @@ libdbus_1_la_CPPFLAGS = \
 	$(AM_CPPFLAGS) \
 	-Ddbus_1_EXPORTS \
 	$(NULL)
-libdbus_1_la_LIBADD= $(LIBDBUS_LIBS)
+libdbus_1_la_LIBADD= $(LIBDBUS_LIBS) $(DBUSPOLICY_LIBS)
+
 libdbus_1_la_LDFLAGS = \
 	$(AM_LDFLAGS) \
 	$(export_symbols) \
@@ -291,24 +312,45 @@ libdbus_internal_la_CPPFLAGS = \
 	$(AM_CPPFLAGS) \
 	-DDBUS_STATIC_BUILD \
 	$(NULL)
+
+if ENABLE_KDBUS_TRANSPORT
+libdbus_internal_la_CPPFLAGS += -DKDBUS_NOT_FOR_DAEMON
+endif
+
+if POLICY_IN_LIB
+## daemon should ignore policies in lib part
+libdbus_internal_la_CPPFLAGS += -DREMOVE_POLICY_FROM_DAEMON
+endif
+
 libdbus_internal_la_LIBADD=$(LIBDBUS_LIBS) $(SYSTEMD_LIBS)
+
+if DBUS_WIN
+# This must be a separate convenience library, otherwise libtool notices
+# that libdbus-1 might contain C++, links it with g++ and links in libstdc++,
+# even on Unix where in fact it doesn't contain any C++. For Windows, where
+# this code is used, we don't actually need libstdc++.
+noinst_LTLIBRARIES += libdbus-init-win.la
+libdbus_init_win_la_SOURCES = dbus-init-win.cpp
+libdbus_1_la_LIBADD += libdbus-init-win.la
+libdbus_internal_la_LIBADD += libdbus-init-win.la
+endif
 
 noinst_PROGRAMS =
 
-if DBUS_BUILD_TESTS
+if DBUS_ENABLE_EMBEDDED_TESTS
 # We can't actually run this til we've reached test/
-noinst_PROGRAMS += dbus-test
+noinst_PROGRAMS += test-dbus
 endif
 
-dbus_test_SOURCES=				\
+test_dbus_SOURCES=				\
 	dbus-test-main.c
 
-dbus_test_LDADD = libdbus-internal.la
+test_dbus_LDADD = libdbus-internal.la
 
 ## mop up the gcov files
 clean-local:
 	/bin/rm *.bb *.bbg *.da *.gcov .libs/*.da .libs/*.bbg || true
 
 update-systemd:
-	curl http://cgit.freedesktop.org/systemd/plain/src/sd-daemon.c > sd-daemon.c
-	curl http://cgit.freedesktop.org/systemd/plain/src/sd-daemon.h > sd-daemon.h
+	curl http://cgit.freedesktop.org/systemd/systemd/plain/src/libsystemd-daemon/sd-daemon.c > $(srcdir)/sd-daemon.c
+	curl http://cgit.freedesktop.org/systemd/systemd/plain/src/systemd/sd-daemon.h > $(srcdir)/sd-daemon.h

@@ -13,15 +13,13 @@ test not running yet and there is help needed to get them running.
 
 Supported compilers
 -------------------
-On windows Microsoft Visual Studio 2010 (Express and professional variants) 
+On windows Microsoft Visual Studio 2010 (Express and professional variants)
 and mingw-w64|32 are known to work.
 
 Building
 --------
 DBus can be built on windows using automake or cmake. See the
-file README for more information.
-Special cmake build instructions can be found in cmake/readme-cmake.txt
-
+file INSTALL for more information.
 
 windbus and dbus4win Ports
 --------------------------
@@ -32,14 +30,19 @@ updated with windows specific stuff.
 
 Tests
 -----
+ - run complete test suite
+     make check
+   or
+     ctest [-V]
+
  - dbus library check
-    bin\dbus-test.exe <build-root>\test\data
+    ctest [-V] -R test-dbus
 
  - bus daemon check
-    bin\bus-test.exe <build-root>\test\data
+    ctest [-V] -R test-bus
 
  - check available names
-    bin\test_names.exe
+    ctest [-V] -R test-names
 
  - check if dbus-daemon is accessable
     bin\dbus-send.exe --session --type=method_call --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames method return sender=org.freedesktop.DBus -> dest=:1.4 array [ string "org.freedesktop.DBus"string ":1.4"]
@@ -88,13 +91,13 @@ FAQ
 
   The OpenWengo dbus-c++ binding has been ported to windows see in WinDBus svn
   (http://sf.net/projects/windbus)
-  The related test applicationa are running well.
+  The related test applications are running well.
 
 
 TODO
 ----
 
-Oktober 2010:
+October 2010:
 
 - the code wrapped with DBUS_WIN_FIXME should be inspected if it required for windows
 

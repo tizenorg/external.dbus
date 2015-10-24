@@ -2,6 +2,7 @@
 /* dbus-connection.c DBusConnection object
  *
  * Copyright (C) 2002-2006  Red Hat Inc.
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  * 
@@ -44,6 +45,11 @@
 #include "dbus-threads-internal.h"
 #include "dbus-bus.h"
 #include "dbus-marshal-basic.h"
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "dbus-transport-kdbus.h"
+#include "kdbus-common.h"
+#include <stdlib.h>
+#endif
 
 #ifdef DBUS_DISABLE_CHECKS
 #define TOOK_LOCK_CHECK(connection)
@@ -203,26 +209,19 @@
  * @{
  */
 
-#ifdef DBUS_ENABLE_VERBOSE_MODE
 static void
 _dbus_connection_trace_ref (DBusConnection *connection,
     int old_refcount,
     int new_refcount,
     const char *why)
 {
+#ifdef DBUS_ENABLE_VERBOSE_MODE
   static int enabled = -1;
 
   _dbus_trace_ref ("DBusConnection", connection, old_refcount, new_refcount,
       why, "DBUS_CONNECTION_TRACE", &enabled);
-}
-#else
-#define _dbus_connection_trace_ref(c,o,n,w) \
-  do \
-  {\
-    (void) (o); \
-    (void) (n); \
-  } while (0)
 #endif
+}
 
 /**
  * Internal struct representing a message filter function 
@@ -336,8 +335,12 @@ struct DBusConnection
 #ifndef DBUS_DISABLE_CHECKS
   unsigned int have_connection_lock : 1; /**< Used to check locking */
 #endif
-  
-#ifndef DBUS_DISABLE_CHECKS
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  unsigned int monitor_connection : 1; /**< If #TRUE, kdbus will mirror all messages to this connection */
+#endif
+
+#if defined(DBUS_ENABLE_CHECKS) || defined(DBUS_ENABLE_ASSERT)
   int generation; /**< _dbus_current_generation that should correspond to this connection */
 #endif 
 };
@@ -446,7 +449,7 @@ _dbus_connection_wakeup_mainloop (DBusConnection *connection)
     (*connection->wakeup_main_function) (connection->wakeup_main_data);
 }
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 /**
  * Gets the locks so we can examine them
  *
@@ -490,9 +493,9 @@ _dbus_connection_queue_received_message_link (DBusConnection  *connection,
   DBusPendingCall *pending;
   dbus_uint32_t reply_serial;
   DBusMessage *message;
-  
-  _dbus_assert (_dbus_transport_get_is_authenticated (connection->transport));
-  
+
+  _dbus_assert (_dbus_transport_peek_is_authenticated (connection->transport));
+
   _dbus_list_append_link (&connection->incoming_messages,
                           link);
   message = link->data;
@@ -1252,8 +1255,13 @@ _dbus_connection_do_iteration_unlocked (DBusConnection *connection,
  * @param transport the transport.
  * @returns the new connection, or #NULL on failure.
  */
+#ifdef ENABLE_KDBUS_TRANSPORT
+static DBusConnection*
+_dbus_connection_new_for_transport_internal (DBusTransport *transport, dbus_bool_t exists)
+#else
 DBusConnection*
 _dbus_connection_new_for_transport (DBusTransport *transport)
+#endif
 {
   DBusConnection *connection;
   DBusWatchList *watch_list;
@@ -1354,28 +1362,37 @@ _dbus_connection_new_for_transport (DBusTransport *transport)
   connection->disconnected_message_arrived = FALSE;
   connection->disconnected_message_processed = FALSE;
   
-#ifndef DBUS_DISABLE_CHECKS
+#if defined(DBUS_ENABLE_CHECKS) || defined(DBUS_ENABLE_ASSERT)
   connection->generation = _dbus_current_generation;
 #endif
   
+#ifdef ENABLE_KDBUS_TRANSPORT
+  connection->monitor_connection = FALSE;
+#endif
+
   _dbus_data_slot_list_init (&connection->slot_list);
 
   connection->client_serial = 1;
 
   connection->disconnect_message_link = disconnect_link;
 
-  CONNECTION_LOCK (connection);
-  
-  if (!_dbus_transport_set_connection (transport, connection))
-    {
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(!exists)
+#endif
+  {
+      CONNECTION_LOCK (connection);
+
+      if (!_dbus_transport_set_connection (transport, connection))
+        {
+          CONNECTION_UNLOCK (connection);
+
+          goto error;
+        }
+
+      _dbus_transport_ref (transport);
+
       CONNECTION_UNLOCK (connection);
-
-      goto error;
-    }
-
-  _dbus_transport_ref (transport);
-
-  CONNECTION_UNLOCK (connection);
+  }
 
   _dbus_connection_trace_ref (connection, 0, 1, "new_for_transport");
   return connection;
@@ -1414,6 +1431,29 @@ _dbus_connection_new_for_transport (DBusTransport *transport)
   
   return NULL;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+/**
+ * Creates a new connection for the given transport.  A transport
+ * represents a message stream that uses some concrete mechanism, such
+ * as UNIX domain sockets. May return #NULL if insufficient
+ * memory exists to create the connection.
+ *
+ * @param transport the transport.
+ * @returns the new connection, or #NULL on failure.
+ */
+DBusConnection*
+_dbus_connection_new_for_transport (DBusTransport *transport)
+{
+    return _dbus_connection_new_for_transport_internal(transport, FALSE);
+}
+
+DBusConnection*
+_dbus_connection_new_for_used_transport (DBusTransport *transport)
+{
+    return _dbus_connection_new_for_transport_internal(transport, TRUE);
+}
+#endif
 
 /**
  * Increments the reference count of a DBusConnection.
@@ -1531,7 +1571,7 @@ _dbus_connection_handle_watch (DBusWatch                   *watch,
   return retval;
 }
 
-_DBUS_DEFINE_GLOBAL_LOCK (shared_connections);
+/* Protected by _DBUS_LOCK (shared_connections) */
 static DBusHashTable *shared_connections = NULL;
 static DBusList *shared_connections_no_guid = NULL;
 
@@ -1555,9 +1595,14 @@ static void
 shared_connections_shutdown (void *data)
 {
   int n_entries;
-  
-  _DBUS_LOCK (shared_connections);
-  
+
+  if (!_DBUS_LOCK (shared_connections))
+    {
+      /* We'd have initialized locks before adding anything, so there
+       * can't be anything there. */
+      return;
+    }
+
   /* This is a little bit unpleasant... better ideas? */
   while ((n_entries = _dbus_hash_table_get_n_entries (shared_connections)) > 0)
     {
@@ -1571,7 +1616,8 @@ shared_connections_shutdown (void *data)
 
       _DBUS_UNLOCK (shared_connections);
       close_connection_on_shutdown (connection);
-      _DBUS_LOCK (shared_connections);
+      if (!_DBUS_LOCK (shared_connections))
+        _dbus_assert_not_reached ("global locks were already initialized");
 
       /* The connection should now be dead and not in our hash ... */
       _dbus_assert (_dbus_hash_table_get_n_entries (shared_connections) < n_entries);
@@ -1590,7 +1636,8 @@ shared_connections_shutdown (void *data)
         {
           _DBUS_UNLOCK (shared_connections);
           close_connection_on_shutdown (connection);
-          _DBUS_LOCK (shared_connections);
+          if (!_DBUS_LOCK (shared_connections))
+            _dbus_assert_not_reached ("global locks were already initialized");
           connection = _dbus_list_pop_first (&shared_connections_no_guid);
         }
     }
@@ -1607,8 +1654,13 @@ connection_lookup_shared (DBusAddressEntry  *entry,
   _dbus_verbose ("checking for existing connection\n");
   
   *result = NULL;
-  
-  _DBUS_LOCK (shared_connections);
+
+  if (!_DBUS_LOCK (shared_connections))
+    {
+      /* If it was shared, we'd have initialized global locks when we put
+       * it in shared_connections. */
+      return FALSE;
+    }
 
   if (shared_connections == NULL)
     {
@@ -1706,7 +1758,8 @@ connection_record_shared_unlocked (DBusConnection *connection,
 
   if (guid == NULL)
     {
-      _DBUS_LOCK (shared_connections);
+      if (!_DBUS_LOCK (shared_connections))
+        return FALSE;
 
       if (!_dbus_list_prepend (&shared_connections_no_guid, connection))
         {
@@ -1733,8 +1786,14 @@ connection_record_shared_unlocked (DBusConnection *connection,
       dbus_free (guid_key);
       return FALSE;
     }
-  
-  _DBUS_LOCK (shared_connections);
+
+  if (!_DBUS_LOCK (shared_connections))
+    {
+      dbus_free (guid_in_connection);
+      dbus_free (guid_key);
+      return FALSE;
+    }
+
   _dbus_assert (shared_connections != NULL);
   
   if (!_dbus_hash_table_insert_string (shared_connections,
@@ -1765,9 +1824,14 @@ connection_forget_shared_unlocked (DBusConnection *connection)
 
   if (!connection->shareable)
     return;
-  
-  _DBUS_LOCK (shared_connections);
-      
+
+  if (!_DBUS_LOCK (shared_connections))
+    {
+      /* If it was shared, we'd have initialized global locks when we put
+       * it in the table; so it can't be there. */
+      return;
+    }
+
   if (connection->server_guid != NULL)
     {
       _dbus_verbose ("dropping connection to %s out of the shared table\n",
@@ -2150,7 +2214,7 @@ _dbus_connection_close_if_only_one_ref (DBusConnection *connection)
  * relatively long time for memory, if they were only willing to block
  * briefly then we retry for memory at a rapid rate.
  *
- * @timeout_milliseconds the timeout requested for blocking
+ * @param timeout_milliseconds the timeout requested for blocking
  */
 static void
 _dbus_memory_pause_based_on_timeout (int timeout_milliseconds)
@@ -2165,7 +2229,7 @@ _dbus_memory_pause_based_on_timeout (int timeout_milliseconds)
     _dbus_sleep_milliseconds (1000);
 }
 
-static DBusMessage *
+DBusMessage *
 generate_local_error_message (dbus_uint32_t serial, 
                               char *error_name, 
                               char *error_msg)
@@ -2532,6 +2596,33 @@ _dbus_connection_block_pending_call (DBusPendingCall *pending)
   dbus_pending_call_unref (pending);
 }
 
+/**
+ * Return how many file descriptors are pending in the loader
+ *
+ * @param connection the connection
+ */
+int
+_dbus_connection_get_pending_fds_count (DBusConnection *connection)
+{
+  return _dbus_transport_get_pending_fds_count (connection->transport);
+}
+
+/**
+ * Register a function to be called whenever the number of pending file
+ * descriptors in the loader change.
+ *
+ * @param connection the connection
+ * @param callback the callback
+ */
+void
+_dbus_connection_set_pending_fds_function (DBusConnection *connection,
+                                           DBusPendingFdsChangeFunction callback,
+                                           void *data)
+{
+  _dbus_transport_set_pending_fds_function (connection->transport,
+                                            callback, data);
+}
+
 /** @} */
 
 /**
@@ -2583,6 +2674,19 @@ dbus_connection_open (const char     *address,
 
   return connection;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusConnection*
+dbus_connection_open_monitor (const char     *address,
+                      DBusError      *error)
+{
+  DBusConnection *connection = dbus_connection_open(address, error);
+  _dbus_return_val_if_error_is_set (error, NULL);
+  connection->monitor_connection = TRUE;
+
+  return connection;
+}
+#endif
 
 /**
  * Opens a new, dedicated connection to a remote address. Unlike
@@ -2658,12 +2762,29 @@ free_outgoing_message (void *element,
   dbus_message_unref (message);
 }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+void
+dbus_connection_clear_disconnect_message(DBusConnection *connection)
+{
+  DBusMessage *message = connection->disconnect_message_link->data;
+  dbus_message_unref (message);
+  _dbus_list_free_link (connection->disconnect_message_link);
+
+  connection->disconnect_message_link = NULL;
+}
+#endif
+
 /* This is run without the mutex held, but after the last reference
  * to the connection has been dropped we should have no thread-related
  * problems
  */
+#ifdef ENABLE_KDBUS_TRANSPORT
+static void
+_dbus_connection_last_unref_internal (DBusConnection *connection, dbus_bool_t unref_transport)
+#else
 static void
 _dbus_connection_last_unref (DBusConnection *connection)
+#endif
 {
   DBusList *link;
 
@@ -2674,7 +2795,10 @@ _dbus_connection_last_unref (DBusConnection *connection)
   /* You have to disconnect the connection before unref:ing it. Otherwise
    * you won't get the disconnected message.
    */
-  _dbus_assert (!_dbus_transport_get_is_connected (connection->transport));
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(unref_transport)
+#endif
+      _dbus_assert (!_dbus_transport_get_is_connected (connection->transport));
   _dbus_assert (connection->server_guid == NULL);
   
   /* ---- We're going to call various application callbacks here, hope it doesn't break anything... */
@@ -2683,6 +2807,7 @@ _dbus_connection_last_unref (DBusConnection *connection)
   dbus_connection_set_dispatch_status_function (connection, NULL, NULL, NULL);
   dbus_connection_set_wakeup_main_function (connection, NULL, NULL, NULL);
   dbus_connection_set_unix_user_function (connection, NULL, NULL, NULL);
+  dbus_connection_set_windows_user_function (connection, NULL, NULL, NULL);
   
   _dbus_watch_list_free (connection->watches);
   connection->watches = NULL;
@@ -2727,7 +2852,10 @@ _dbus_connection_last_unref (DBusConnection *connection)
 
   _dbus_counter_unref (connection->outgoing_counter);
 
-  _dbus_transport_unref (connection->transport);
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(unref_transport)
+#endif
+      _dbus_transport_unref (connection->transport);
 
   if (connection->disconnect_message_link)
     {
@@ -2748,6 +2876,18 @@ _dbus_connection_last_unref (DBusConnection *connection)
   
   dbus_free (connection);
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+/* This is run without the mutex held, but after the last reference
+ * to the connection has been dropped we should have no thread-related
+ * problems
+ */
+static void
+_dbus_connection_last_unref (DBusConnection *connection)
+{
+    _dbus_connection_last_unref_internal(connection, TRUE);
+}
+#endif
 
 /**
  * Decrements the reference count of a DBusConnection, and finalizes
@@ -2952,13 +3092,54 @@ dbus_connection_get_is_authenticated (DBusConnection *connection)
   dbus_bool_t res;
 
   _dbus_return_val_if_fail (connection != NULL, FALSE);
-  
+
   CONNECTION_LOCK (connection);
-  res = _dbus_transport_get_is_authenticated (connection->transport);
+  res = _dbus_transport_try_to_authenticate (connection->transport);
   CONNECTION_UNLOCK (connection);
   
   return res;
 }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+/**
+ * Sets authenticated status for connection. Needed for kdbus, where authentication is
+ * made in different manner.
+ * LOCK commented out because called with lock already set
+ * @param connection the connection
+ */
+dbus_bool_t
+dbus_connection_set_is_authenticated (DBusConnection *connection)
+{
+  _dbus_return_val_if_fail (connection != NULL, FALSE);
+
+//  CONNECTION_LOCK (connection);
+  connection->transport->authenticated = TRUE;
+//  CONNECTION_UNLOCK (connection);
+
+  return TRUE;
+}
+
+dbus_bool_t
+dbus_connection_is_kdbus (DBusConnection *connection)
+{
+    _dbus_return_val_if_fail (connection != NULL, FALSE);
+
+    if ((connection->transport == NULL) || (connection->transport->address == NULL))
+      return FALSE;
+
+    if(!strncmp(_dbus_connection_get_address(connection), "kernel:", 6))
+      return TRUE;
+
+    return FALSE;
+}
+
+dbus_bool_t
+dbus_connection_is_monitor (DBusConnection *connection)
+{
+    _dbus_return_val_if_fail (connection != NULL, FALSE);
+    return connection->monitor_connection;
+}
+#endif
 
 /**
  * Gets whether the connection is not authenticated as a specific
@@ -3225,6 +3406,19 @@ _dbus_connection_send_unlocked_no_update (DBusConnection *connection,
                                                          client_serial);
   return TRUE;
 }
+
+#if defined(POLICY_IN_LIB) && !defined(REMOVE_POLICY_FROM_DAEMON)
+//wrapper for static function needed by policy checking
+dbus_bool_t
+_dbus_connection_send_unlocked_no_update_no_static (DBusConnection *connection,
+                                          DBusMessage    *message,
+                                          dbus_uint32_t  *client_serial)
+{
+  return _dbus_connection_send_unlocked_no_update (connection,
+                                              message,
+                                              client_serial);
+}
+#endif
 
 /**
  * Adds a message to the outgoing message queue. Does not block to
@@ -3938,7 +4132,7 @@ _dbus_connection_pop_message_link_unlocked (DBusConnection *connection)
       link = _dbus_list_pop_first_link (&connection->incoming_messages);
       connection->n_incoming -= 1;
 
-      _dbus_verbose ("Message %p (%s %s %s %s '%s') removed from incoming queue %p, %d incoming\n",
+      _dbus_verbose ("Message %p (%s %s %s %s sig:'%s' serial:%u) removed from incoming queue %p, %d incoming\n",
                      link->data,
                      dbus_message_type_to_string (dbus_message_get_type (link->data)),
                      dbus_message_get_path (link->data) ?
@@ -3951,6 +4145,7 @@ _dbus_connection_pop_message_link_unlocked (DBusConnection *connection)
                      dbus_message_get_member (link->data) :
                      "no member",
                      dbus_message_get_signature (link->data),
+                     dbus_message_get_serial (link->data),
                      connection, connection->n_incoming);
 
       _dbus_message_trace_ref (link->data, -1, -1,
@@ -3967,7 +4162,10 @@ _dbus_connection_pop_message_link_unlocked (DBusConnection *connection)
 /* See dbus_connection_pop_message, but requires the caller to own
  * the lock before calling. May drop the lock while running.
  */
-static DBusMessage*
+#ifndef ENABLE_KDBUS_TRANSPORT
+static
+#endif
+DBusMessage*
 _dbus_connection_pop_message_unlocked (DBusConnection *connection)
 {
   DBusList *link;
@@ -5117,6 +5315,18 @@ dbus_connection_get_socket(DBusConnection              *connection,
   return retval;
 }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+/**
+ *
+ * Getter for number of messages in incoming queue.
+ * Useful for sending reply to self (see kdbus_do_iteration)
+ */
+int
+dbus_connection_get_n_incoming (DBusConnection *connection)
+{
+  return connection->n_incoming;
+}
+#endif
 
 /**
  * Gets the UNIX user ID of the connection if known.  Returns #TRUE if
@@ -5144,18 +5354,37 @@ dbus_bool_t
 dbus_connection_get_unix_user (DBusConnection *connection,
                                unsigned long  *uid)
 {
-  dbus_bool_t result;
+  dbus_bool_t result = FALSE;
 
   _dbus_return_val_if_fail (connection != NULL, FALSE);
   _dbus_return_val_if_fail (uid != NULL, FALSE);
-  
+
   CONNECTION_LOCK (connection);
 
-  if (!_dbus_transport_get_is_authenticated (connection->transport))
-    result = FALSE;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if (_dbus_connection_get_address (connection) != NULL)
+    {
+      const char *unique_name = dbus_bus_get_unique_name (connection);
+      if (unique_name != NULL)
+        {
+          if (!strncmp (_dbus_connection_get_address (connection), "kernel:", strlen("kernel:")))
+            result = kdbus_connection_get_unix_user (connection, unique_name, uid, NULL);
+        }
+      else
+        {
+          _dbus_verbose("Unable to get bus unique name");
+          result = FALSE;
+        }
+    }
   else
-    result = _dbus_transport_get_unix_user (connection->transport,
-                                            uid);
+#endif
+    {
+      if (!_dbus_transport_try_to_authenticate (connection->transport))
+        result = FALSE;
+      else
+        result = _dbus_transport_get_unix_user (connection->transport,
+                                                uid);
+    }
 
 #ifdef DBUS_WIN
   _dbus_assert (!result);
@@ -5180,18 +5409,37 @@ dbus_bool_t
 dbus_connection_get_unix_process_id (DBusConnection *connection,
 				     unsigned long  *pid)
 {
-  dbus_bool_t result;
+  dbus_bool_t result = FALSE;
 
   _dbus_return_val_if_fail (connection != NULL, FALSE);
   _dbus_return_val_if_fail (pid != NULL, FALSE);
-  
+
   CONNECTION_LOCK (connection);
 
-  if (!_dbus_transport_get_is_authenticated (connection->transport))
-    result = FALSE;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if (_dbus_connection_get_address (connection) != NULL)
+    {
+      const char *unique_name = dbus_bus_get_unique_name (connection);
+      if (unique_name != NULL)
+        {
+          if (!strncmp (_dbus_connection_get_address (connection), "kernel:", strlen("kernel:")))
+            result = kdbus_connection_get_unix_process_id (connection, unique_name, pid, NULL);
+        }
+      else
+        {
+          _dbus_verbose("Unable to get bus unique name.");
+          result = FALSE;
+        }
+    }
   else
-    result = _dbus_transport_get_unix_process_id (connection->transport,
-						  pid);
+#endif
+    {
+      if (!_dbus_transport_try_to_authenticate (connection->transport))
+        result = FALSE;
+      else
+        result = _dbus_transport_get_unix_process_id (connection->transport,
+                                                      pid);
+    }
 
   CONNECTION_UNLOCK (connection);
 
@@ -5205,7 +5453,8 @@ dbus_connection_get_unix_process_id (DBusConnection *connection,
  * connection.
  *
  * @param connection the connection
- * @param data return location for audit data 
+ * @param data return location for audit data
+ * @param data_size return location for length of audit data
  * @returns #TRUE if audit data is filled in with a valid ucred pointer
  */
 dbus_bool_t
@@ -5218,10 +5467,10 @@ dbus_connection_get_adt_audit_session_data (DBusConnection *connection,
   _dbus_return_val_if_fail (connection != NULL, FALSE);
   _dbus_return_val_if_fail (data != NULL, FALSE);
   _dbus_return_val_if_fail (data_size != NULL, FALSE);
-  
+
   CONNECTION_LOCK (connection);
 
-  if (!_dbus_transport_get_is_authenticated (connection->transport))
+  if (!_dbus_transport_try_to_authenticate (connection->transport))
     result = FALSE;
   else
     result = _dbus_transport_get_adt_audit_session_data (connection->transport,
@@ -5314,10 +5563,10 @@ dbus_connection_get_windows_user (DBusConnection             *connection,
 
   _dbus_return_val_if_fail (connection != NULL, FALSE);
   _dbus_return_val_if_fail (windows_sid_p != NULL, FALSE);
-  
+
   CONNECTION_LOCK (connection);
 
-  if (!_dbus_transport_get_is_authenticated (connection->transport))
+  if (!_dbus_transport_try_to_authenticate (connection->transport))
     result = FALSE;
   else
     result = _dbus_transport_get_windows_user (connection->transport,
@@ -5435,7 +5684,7 @@ dbus_connection_set_route_peer_messages (DBusConnection             *connection,
   _dbus_return_if_fail (connection != NULL);
   
   CONNECTION_LOCK (connection);
-  connection->route_peer_messages = TRUE;
+  connection->route_peer_messages = value;
   CONNECTION_UNLOCK (connection);
 }
 
@@ -5852,8 +6101,8 @@ dbus_connection_list_registered (DBusConnection              *connection,
   return retval;
 }
 
-static DBusDataSlotAllocator slot_allocator;
-_DBUS_DEFINE_GLOBAL_LOCK (connection_slots);
+static DBusDataSlotAllocator slot_allocator =
+  _DBUS_DATA_SLOT_ALLOCATOR_INIT (_DBUS_LOCK_NAME (connection_slots));
 
 /**
  * Allocates an integer ID to be used for storing application-specific
@@ -5873,7 +6122,6 @@ dbus_bool_t
 dbus_connection_allocate_data_slot (dbus_int32_t *slot_p)
 {
   return _dbus_data_slot_allocator_alloc (&slot_allocator,
-                                          &_DBUS_LOCK_NAME (connection_slots),
                                           slot_p);
 }
 
@@ -5974,7 +6222,8 @@ dbus_connection_get_data (DBusConnection   *connection,
   void *res;
 
   _dbus_return_val_if_fail (connection != NULL, NULL);
-  
+  _dbus_return_val_if_fail (slot >= 0, NULL);
+
   SLOTS_LOCK (connection);
 
   res = _dbus_data_slot_list_get (&slot_allocator,
@@ -6043,7 +6292,7 @@ dbus_connection_get_max_message_size (DBusConnection *connection)
  * result in disconnecting the connection.
  *
  * @param connection a #DBusConnection
- * @param size maximum message unix fds the connection can receive
+ * @param n maximum message unix fds the connection can receive
  */
 void
 dbus_connection_set_max_message_unix_fds (DBusConnection *connection,
@@ -6141,7 +6390,7 @@ dbus_connection_get_max_received_size (DBusConnection *connection)
  * The semantics are analogous to those of dbus_connection_set_max_received_size().
  *
  * @param connection the connection
- * @param size the maximum size in bytes of all outstanding messages
+ * @param n the maximum size in bytes of all outstanding messages
  */
 void
 dbus_connection_set_max_received_unix_fds (DBusConnection *connection,
@@ -6258,7 +6507,6 @@ dbus_connection_get_outgoing_unix_fds (DBusConnection *connection)
   return res;
 }
 
-#ifdef DBUS_BUILD_TESTS
 /**
  * Returns the address of the transport object of this connection
  *
@@ -6269,6 +6517,15 @@ const char*
 _dbus_connection_get_address (DBusConnection *connection)
 {
   return _dbus_transport_get_address (connection->transport);
+}
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusTransport*
+dbus_connection_get_transport(DBusConnection *connection)
+{
+	_dbus_return_val_if_fail (connection != NULL, NULL);
+
+	return connection->transport;
 }
 #endif
 

@@ -87,9 +87,8 @@ typedef struct DBusPipe DBusPipe;
 
 void _dbus_abort (void) _DBUS_GNUC_NORETURN;
 
+dbus_bool_t _dbus_check_setuid (void);
 const char* _dbus_getenv (const char *varname);
-dbus_bool_t _dbus_setenv (const char *varname,
-			  const char *value);
 dbus_bool_t _dbus_clearenv (void);
 char **     _dbus_get_environment (void);
 
@@ -277,6 +276,19 @@ dbus_int32_t _dbus_atomic_get (DBusAtomic *atomic);
 #define _DBUS_POLLHUP     0x0080
 /** Invalid request: fd not open */
 #define _DBUS_POLLNVAL    0x1000
+#elif defined(__QNX__)
+/** Writing now will not block */
+#define _DBUS_POLLOUT     0x0002
+/** There is data to read */
+#define _DBUS_POLLIN      0x0005
+/** There is urgent data to read */
+#define _DBUS_POLLPRI     0x0008
+/** Error condition */
+#define _DBUS_POLLERR     0x0020
+/** Hung up */
+#define _DBUS_POLLHUP     0x0040
+/** Invalid request: fd not open */
+#define _DBUS_POLLNVAL    0x1000
 #else
 /** There is data to read */
 #define _DBUS_POLLIN      0x0001
@@ -372,6 +384,7 @@ dbus_bool_t _dbus_get_is_errno_eagain_or_ewouldblock (void);
 dbus_bool_t _dbus_get_is_errno_enomem                (void);
 dbus_bool_t _dbus_get_is_errno_eintr                 (void);
 dbus_bool_t _dbus_get_is_errno_epipe                 (void);
+dbus_bool_t _dbus_get_is_errno_etoomanyrefs           (void);
 const char* _dbus_strerror_from_errno                (void);
 
 void _dbus_disable_sigpipe (void);
@@ -436,10 +449,11 @@ void _dbus_set_signal_handler (int               sig,
 dbus_bool_t _dbus_user_at_console (const char *username,
                                    DBusError  *error);
 
-void _dbus_init_system_log (void);
+void _dbus_init_system_log (dbus_bool_t is_daemon);
 
 typedef enum {
   DBUS_SYSTEM_LOG_INFO,
+  DBUS_SYSTEM_LOG_WARNING,
   DBUS_SYSTEM_LOG_SECURITY,
   DBUS_SYSTEM_LOG_FATAL
 } DBusSystemLogSeverity;
@@ -506,6 +520,16 @@ dbus_bool_t _dbus_read_local_machine_uuid   (DBusGUID         *machine_id,
  */
 dbus_bool_t _dbus_threads_init_platform_specific (void);
 
+/**
+ * Lock a static mutex used to protect _dbus_threads_init_platform_specific().
+ */
+void _dbus_threads_lock_platform_specific (void);
+
+/**
+ * Undo _dbus_threads_lock_platform_specific().
+ */
+void _dbus_threads_unlock_platform_specific (void);
+
 dbus_bool_t _dbus_split_paths_and_append (DBusString *dirs, 
                                           const char *suffix, 
                                           DBusList **dir_list);
@@ -523,8 +547,6 @@ dbus_bool_t _dbus_change_to_daemon_user (const char *user,
 
 void _dbus_flush_caches (void);
 
-void _dbus_request_file_descriptor_limit (unsigned int limit);
-
 /*
  * replaces the term DBUS_PREFIX in configure_time_path by the
  * current dbus installation directory. On unix this function is a noop
@@ -534,6 +556,23 @@ void _dbus_request_file_descriptor_limit (unsigned int limit);
  */
 const char *
 _dbus_replace_install_prefix (const char *configure_time_path);
+
+/* Do not set this too high: it is a denial-of-service risk.
+ * See <https://bugs.freedesktop.org/show_bug.cgi?id=82820>
+ *
+ * (This needs to be in the non-Unix-specific header so that
+ * the config-parser can use it.)
+ */
+#define DBUS_DEFAULT_MESSAGE_UNIX_FDS 16
+
+typedef struct DBusRLimit DBusRLimit;
+
+DBusRLimit     *_dbus_rlimit_save_fd_limit                 (DBusError    *error);
+dbus_bool_t     _dbus_rlimit_raise_fd_limit_if_privileged  (unsigned int  desired,
+                                                            DBusError    *error);
+dbus_bool_t     _dbus_rlimit_restore_fd_limit              (DBusRLimit   *saved,
+                                                            DBusError    *error);
+void            _dbus_rlimit_free                          (DBusRLimit   *lim);
 
 /** @} */
 

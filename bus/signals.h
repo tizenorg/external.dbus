@@ -28,6 +28,34 @@
 #include <dbus/dbus-string.h>
 #include <dbus/dbus-sysdeps.h>
 #include "connection.h"
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include <linux/types.h>
+
+#define BUS_MATCH_ARG_NAMESPACE   0x4000000u  // Defines taken from signals.c
+#define BUS_MATCH_ARG_IS_PATH     0x8000000u
+
+struct BusMatchRule
+{
+  int refcount;       /**< reference count */
+
+  DBusConnection *matches_go_to; /**< Owner of the rule */
+
+  unsigned int flags; /**< BusMatchFlags */
+
+  int   message_type;
+  char *interface;
+  char *member;
+  char *sender;
+  char *destination;
+  char *path;
+
+  unsigned int *arg_lens;
+  char **args;
+  int args_len;
+
+  __u64 kdbus_cookie;
+};
+#endif
 
 typedef enum
 {
@@ -64,6 +92,13 @@ dbus_bool_t bus_match_rule_set_arg          (BusMatchRule     *rule,
                                              const DBusString *value,
                                              dbus_bool_t       is_path,
                                              dbus_bool_t       is_namespace);
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+void  bus_match_rule_set_cookie (BusMatchRule *rule,
+                              __u64 cookie);
+__u64 bus_match_rule_get_cookie (BusMatchRule *rule);
+dbus_bool_t match_rule_equal   (BusMatchRule *a, BusMatchRule *b);
+#endif
 
 /* Calling this methods a client declares that it is creating a rule which
  * needs to eavesdrop (e.g., dbus-monitor), any other created rules not

@@ -6,6 +6,12 @@
 /* indicate that we are building with cmake */
 #define DBUS_CMAKE 1
 
+@AUTOPACKAGE_CONFIG_H_TEMPLATE@
+
+/*
+ * Variables defined by AC_DEFINE in ../configure.ac
+ * should be placed in this file
+*/
 #cmakedefine HAVE_GNUC_VARARGS 1
 
 #cmakedefine DBUS_CONSOLE_AUTH_DIR "@DBUS_CONSOLE_AUTH_DIR@"
@@ -15,35 +21,30 @@
 #cmakedefine DBUS_SESSION_CONFIG_FILE "@DBUS_SESSION_CONFIG_FILE@"
 #cmakedefine DBUS_DAEMON_NAME "@DBUS_DAEMON_NAME@"
 #cmakedefine DBUS_SYSTEM_BUS_DEFAULT_ADDRESS  "@DBUS_SYSTEM_BUS_DEFAULT_ADDRESS@"
+#cmakedefine DBUS_SESSION_BUS_CONNECT_ADDRESS  "@DBUS_SESSION_BUS_CONNECT_ADDRESS@"
 #cmakedefine DBUS_MACHINE_UUID_FILE "@DBUS_MACHINE_UUID_FILE@"
-#cmakedefine DBUS_SESSION_BUS_DEFAULT_ADDRESS "@DBUS_SESSION_BUS_DEFAULT_ADDRESS@"
 #cmakedefine DBUS_DAEMONDIR "@DBUS_DAEMONDIR@"
-#cmakedefine PACKAGE "@PACKAGE@"
-/* Version number of package */
-#cmakedefine DBUS_MAJOR_VERSION @DBUS_MAJOR_VERSION@
-#cmakedefine DBUS_MINOR_VERSION @DBUS_MINOR_VERSION@
-#cmakedefine DBUS_MICRO_VERSION @DBUS_MICRO_VERSION@
-#cmakedefine DBUS_VERSION ((@DBUS_MAJOR_VERSION@ << 16) | (@DBUS_MINOR_VERSION@ << 8) | (@DBUS_MICRO_VERSION@))
-#cmakedefine DBUS_VERSION_STRING "@DBUS_VERSION_STRING@"
-#cmakedefine DBUS_ENABLE_STATS
 
-#define VERSION DBUS_VERSION_STRING
+#cmakedefine DBUS_ENABLE_STATS
 
 #define TEST_LISTEN       "@TEST_LISTEN@"
 
 // test binaries
 #define DBUS_TEST_EXEC "@DBUS_TEST_EXEC@"
 #define DBUS_EXEEXT "@EXEEXT@"
-
-/* Full path to test file test/test-exit in builddir */
-#define TEST_BUS_BINARY          "@TEST_BUS_BINARY@"
+#cmakedefine TEST_BUS_LAUNCH_BINARY "@TEST_BUS_LAUNCH_BINARY@"
 
 /* Some dbus features */
-#cmakedefine DBUS_BUILD_TESTS 1
 #cmakedefine DBUS_ENABLE_ANSI 1
 #cmakedefine DBUS_ENABLE_VERBOSE_MODE 1
-#cmakedefine DBUS_DISABLE_ASSERTS 1
+#cmakedefine DBUS_DISABLE_ASSERT 1
+#ifndef DBUS_DISABLE_ASSERT
+#  define DBUS_ENABLE_ASSERT 1
+#endif
 #cmakedefine DBUS_DISABLE_CHECKS 1
+#ifndef DBUS_DISABLE_CHECKS
+#  define DBUS_ENABLE_CHECKS 1
+#endif
 /* xmldocs */
 /* doxygen */
 #cmakedefine DBUS_GCOV_ENABLED 1
@@ -63,7 +64,6 @@
 #endif
 
 /* selinux */
-#cmakedefine DBUS_BUS_ENABLE_DNOTIFY_ON_LINUX 1
 /* kqueue */
 #cmakedefine HAVE_CONSOLE_OWNER_FILE 1
 #define DBUS_CONSOLE_OWNER_FILE "@DBUS_CONSOLE_OWNER_FILE@"
@@ -119,9 +119,6 @@
 
 /* Define to 1 if you have ws2tcpip.h */
 #cmakedefine   HAVE_WS2TCPIP_H
-
-/* Define to 1 if you have wspiapi.h */
-#cmakedefine   HAVE_WSPIAPI_H 1
 
 /* Define to 1 if you have unistd.h */
 #cmakedefine   HAVE_UNISTD_H 1
@@ -197,6 +194,8 @@
 /* Define to 1 if you have struct cmsgred */
 #cmakedefine    HAVE_CMSGCRED 1
 
+#cmakedefine FD_SETSIZE @FD_SETSIZE@
+
 // system type defines
 #if defined(_WIN32) || defined(_WIN64) || defined (_WIN32_WCE)
 # define DBUS_WIN
@@ -247,6 +246,10 @@
 
 # if defined(_MSC_VER) && !defined(inline)
 #define inline __inline
+#endif
+
+#ifdef DBUS_WIN
+#define FD_SETSIZE @FD_SETSIZE@
 #endif
 
 #endif  // _DBUS_CONFIG_H

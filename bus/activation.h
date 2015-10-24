@@ -62,8 +62,9 @@ dbus_bool_t    dbus_activation_systemd_failure (BusActivation     *activation,
 
 dbus_bool_t    bus_activation_send_pending_auto_activation_messages (BusActivation     *activation,
 								     BusService        *service,
-								     BusTransaction    *transaction,
-								     DBusError         *error);
-
+								     BusTransaction    *transaction);
+#ifdef ENABLE_KDBUS_TRANSPORT
+dbus_bool_t   remove_pending_activation(BusActivation  *activation, const char* name);
+#endif
 
 #endif /* BUS_ACTIVATION_H */

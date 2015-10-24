@@ -4,6 +4,7 @@
  * Copyright (C) 2003  CodeFactory AB
  * Copyright (C) 2003, 2004, 2005  Red Hat, Inc.
  * Copyright (C) 2004  Imendio HB
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  *
@@ -34,7 +35,11 @@
 #include "signals.h"
 #include "test.h"
 #include <dbus/dbus-internals.h>
+#include <dbus/dbus-misc.h>
 #include <string.h>
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "kdbus-d.h"
+#endif
 
 #ifdef HAVE_UNIX_FD_PASSING
 #include <dbus/dbus-sysdeps-unix.h>
@@ -46,6 +51,13 @@
  * dbus_connection_open_private() does not block. */
 #define TEST_DEBUG_PIPE "debug-pipe:name=test-server"
 
+static inline const char *
+nonnull (const char *maybe_null,
+         const char *if_null)
+{
+  return (maybe_null ? maybe_null : if_null);
+}
+
 static dbus_bool_t
 send_one_message (DBusConnection *connection,
                   BusContext     *context,
@@ -55,17 +67,47 @@ send_one_message (DBusConnection *connection,
                   BusTransaction *transaction,
                   DBusError      *error)
 {
+  DBusError stack_error = DBUS_ERROR_INIT;
+
   if (!bus_context_check_security_policy (context, transaction,
                                           sender,
                                           addressed_recipient,
                                           connection,
                                           message,
-                                          NULL))
-    return TRUE; /* silently don't send it */
+                                          &stack_error))
+    {
+      if (!bus_transaction_capture_error_reply (transaction, &stack_error,
+                                                message))
+        {
+          bus_context_log (context, DBUS_SYSTEM_LOG_WARNING,
+                           "broadcast rejected, but not enough "
+                           "memory to tell monitors");
+        }
+
+      dbus_error_free (&stack_error);
+      return TRUE; /* don't send it but don't return an error either */
+    }
 
   if (dbus_message_contains_unix_fds(message) &&
       !dbus_connection_can_send_type(connection, DBUS_TYPE_UNIX_FD))
-    return TRUE; /* silently don't send it */
+    {
+      dbus_set_error (&stack_error, DBUS_ERROR_NOT_SUPPORTED,
+                      "broadcast cannot be delivered to %s (%s) because "
+                      "it does not support receiving Unix fds",
+                      bus_connection_get_name (connection),
+                      bus_connection_get_loginfo (connection));
+
+      if (!bus_transaction_capture_error_reply (transaction, &stack_error,
+                                                message))
+        {
+          bus_context_log (context, DBUS_SYSTEM_LOG_WARNING,
+                           "broadcast with Unix fd not delivered, but not "
+                           "enough memory to tell monitors");
+        }
+
+      dbus_error_free (&stack_error);
+      return TRUE; /* don't send it but don't return an error either */
+    }
 
   if (!bus_transaction_send (transaction,
                              connection,
@@ -132,7 +174,7 @@ bus_dispatch_matches (BusTransaction *transaction,
     }
 
   /* Now dispatch to others who look interested in this message */
-  connections = bus_transaction_get_connections (transaction);
+  connections = bus_context_get_connections (context);
   dbus_error_init (&tmp_error);
   matchmaker = bus_context_get_matchmaker (context);
 
@@ -199,6 +241,54 @@ bus_dispatch (DBusConnection *connection,
   /* Ref connection in case we disconnect it at some point in here */
   dbus_connection_ref (connection);
 
+  /* Monitors aren't meant to send messages to us. */
+  if (bus_connection_is_monitor (connection))
+    {
+      sender = bus_connection_get_name (connection);
+
+      /* should never happen */
+      if (sender == NULL)
+        sender = "(unknown)";
+
+      if (dbus_message_is_signal (message,
+                                  DBUS_INTERFACE_LOCAL,
+                                  "Disconnected"))
+        {
+          bus_context_log (context, DBUS_SYSTEM_LOG_INFO,
+                           "Monitoring connection %s closed.", sender);
+          bus_connection_disconnected (connection);
+          goto out;
+        }
+      else
+        {
+          /* Monitors are not allowed to send messages, because that
+           * probably indicates that the monitor is incorrectly replying
+           * to its eavesdropped messages, and we want the authors of
+           * such monitors to fix them.
+           */
+          bus_context_log (context, DBUS_SYSTEM_LOG_WARNING,
+                           "Monitoring connection %s (%s) is not allowed "
+                           "to send messages; closing it. Please fix the "
+                           "monitor to not do that. "
+                           "(message type=\"%s\" interface=\"%s\" "
+                           "member=\"%s\" error name=\"%s\" "
+                           "destination=\"%s\")",
+                           sender, bus_connection_get_loginfo (connection),
+                           dbus_message_type_to_string (
+                             dbus_message_get_type (message)),
+                           nonnull (dbus_message_get_interface (message),
+                                    "(unset)"),
+                           nonnull (dbus_message_get_member (message),
+                                    "(unset)"),
+                           nonnull (dbus_message_get_error_name (message),
+                                    "(unset)"),
+                           nonnull (dbus_message_get_destination (message),
+                                    DBUS_SERVICE_DBUS));
+          dbus_connection_close (connection);
+          goto out;
+        }
+    }
+
   service_name = dbus_message_get_destination (message);
 
 #ifdef DBUS_ENABLE_VERBOSE_MODE
@@ -216,6 +306,10 @@ bus_dispatch (DBusConnection *connection,
                    service_name ? service_name : "peer");
   }
 #endif /* DBUS_ENABLE_VERBOSE_MODE */
+
+  /* Create our transaction */
+  while ((transaction = bus_transaction_new (context)) == NULL)
+            _dbus_wait_for_memory ();
 
   /* If service_name is NULL, if it's a signal we send it to all
    * connections with a match rule. If it's not a signal, there
@@ -235,22 +329,33 @@ bus_dispatch (DBusConnection *connection,
         {
           /* DBusConnection also handles some of these automatically, we leave
            * it to do so.
+           *
+           * FIXME: this means monitors won't get the opportunity to see
+           * non-signals with NULL destination, or their replies (which in
+           * practice are UnknownMethod errors)
            */
           result = DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
           goto out;
         }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+      if(bus_context_is_kdbus(context))
+      {
+          if (dbus_message_is_signal (message, DBUS_INTERFACE_DBUS, "NameOwnerChanged"))
+          {
+              handleNameOwnerChanged(message, transaction, connection);
+              goto out;
+          }
+      }
+#endif
     }
 
-  /* Create our transaction */
-  transaction = bus_transaction_new (context);
-  if (transaction == NULL)
-    {
-      BUS_SET_OOM (&error);
-      goto out;
-    }
-
+#ifdef ENABLE_KDBUS_TRANSPORT
   /* Assign a sender to the message */
-  if (bus_connection_is_active (connection))
+  if(bus_context_is_kdbus(context) == FALSE)  //if using kdbus, sender must be set on library side
+#endif
+  {
+    if (bus_connection_is_active (connection))
     {
       sender = bus_connection_get_name (connection);
       _dbus_assert (sender != NULL);
@@ -260,14 +365,45 @@ bus_dispatch (DBusConnection *connection,
           BUS_SET_OOM (&error);
           goto out;
         }
-
-      /* We need to refetch the service name here, because
-       * dbus_message_set_sender can cause the header to be
-       * reallocated, and thus the service_name pointer will become
-       * invalid.
-       */
-      service_name = dbus_message_get_destination (message);
     }
+  else
+    {
+      /* For monitors' benefit: we don't want the sender to be able to
+       * trick the monitor by supplying a forged sender, and we also
+       * don't want the message to have no sender at all. */
+      if (!dbus_message_set_sender (message, ":not.active.yet"))
+        {
+          BUS_SET_OOM (&error);
+          goto out;
+        }
+    }
+
+  /* We need to refetch the service name here, because
+   * dbus_message_set_sender can cause the header to be
+   * reallocated, and thus the service_name pointer will become
+   * invalid.
+   */
+  service_name = dbus_message_get_destination (message);
+
+  if (!bus_transaction_capture (transaction, connection, message))
+    {
+      BUS_SET_OOM (&error);
+      goto out;
+    }
+  }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(context))
+    {
+      if (service_name &&
+          strcmp (service_name, bus_connection_get_name(connection)) == 0) /* to daemon's unique name */
+        {
+          if (dbus_message_is_signal(message, DBUS_INTERFACE_DBUS, "NameAcquired")
+              || dbus_message_is_signal (message, DBUS_INTERFACE_DBUS, "NameLost"))
+            goto out;
+        }
+    }
+#endif
 
   if (service_name &&
       strcmp (service_name, DBUS_SERVICE_DBUS) == 0) /* to bus driver */
@@ -346,14 +482,10 @@ bus_dispatch (DBusConnection *connection,
  out:
   if (dbus_error_is_set (&error))
     {
-      if (!dbus_connection_get_is_connected (connection))
-        {
-          /* If we disconnected it, we won't bother to send it any error
-           * messages.
-           */
-          _dbus_verbose ("Not sending error to connection we disconnected\n");
-        }
-      else if (dbus_error_has_name (&error, DBUS_ERROR_NO_MEMORY))
+      /* Even if we disconnected it, pretend to send it any pending error
+       * messages so that monitors can observe them.
+       */
+      if (dbus_error_has_name (&error, DBUS_ERROR_NO_MEMORY))
         {
           bus_connection_send_oom_error (connection, message);
 
@@ -428,7 +560,7 @@ bus_dispatch_remove_connection (DBusConnection *connection)
                                  NULL);
 }
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 
 #include <stdio.h>
 
@@ -1306,9 +1438,15 @@ check_get_connection_unix_process_id (BusContext     *context,
 #endif
       else
         {
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || \
+          defined(__linux__) || \
+          defined(__OpenBSD__)
           warn_unexpected (connection, message, "not this error");
 
           goto out;
+#else
+          _dbus_verbose ("does not support GetConnectionUnixProcessID but perhaps that's OK?\n");
+#endif
         }
     }
   else
@@ -4466,7 +4604,7 @@ setenv_TEST_LAUNCH_HELPER_CONFIG(const DBusString *test_data_dir,
   _dbus_verbose ("Setting TEST_LAUNCH_HELPER_CONFIG to '%s'\n",
                  _dbus_string_get_const_data (&full));
 
-  _dbus_setenv ("TEST_LAUNCH_HELPER_CONFIG", _dbus_string_get_const_data (&full));
+  dbus_setenv ("TEST_LAUNCH_HELPER_CONFIG", _dbus_string_get_const_data (&full));
 
   _dbus_string_free (&full);
 
@@ -4907,4 +5045,4 @@ bus_unix_fds_passing_test(const DBusString *test_data_dir)
 }
 #endif
 
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */

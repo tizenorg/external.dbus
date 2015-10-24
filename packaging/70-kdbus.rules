@@ -1,0 +1,2 @@
+SUBSYSTEM=="kdbus", ENV{DEVTYPE}=="ep", SECLABEL{smack}="*"
+DEVPATH=="/devices/virtual/kdbus/kdbus!control",SECLABEL{smack}="dbus"

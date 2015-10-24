@@ -72,12 +72,19 @@
 #ifdef HAVE_GETPEERUCRED
 #include <ucred.h>
 #endif
+#ifdef HAVE_ALLOCA_H
+#include <alloca.h>
+#endif
 
 #ifdef HAVE_ADT
 #include <bsm/adt.h>
 #endif
 
 #include "sd-daemon.h"
+
+#if !DBUS_USE_SYNC
+#include <pthread.h>
+#endif
 
 #ifndef O_BINARY
 #define O_BINARY 0
@@ -137,7 +144,7 @@ _dbus_open_socket (int              *fd_p,
   cloexec_done = *fd_p >= 0;
 
   /* Check if kernel seems to be too old to know SOCK_CLOEXEC */
-  if (*fd_p < 0 && errno == EINVAL)
+  if (*fd_p < 0 && (errno == EINVAL || errno == EPROTOTYPE))
 #endif
     {
       *fd_p = socket (domain, type, protocol);
@@ -313,6 +320,12 @@ _dbus_read_socket_with_unix_fds (int               fd,
   m.msg_control = alloca(m.msg_controllen);
   memset(m.msg_control, 0, m.msg_controllen);
 
+  /* Do not include the padding at the end when we tell the kernel
+   * how much we're willing to receive. This avoids getting
+   * the padding filled with additional fds that we weren't expecting,
+   * if a (potentially malicious) sender included them. (fd.o #83622) */
+  m.msg_controllen = CMSG_LEN (*n_fds * sizeof(int));
+
  again:
 
   bytes_read = recvmsg(fd, &m, 0
@@ -352,18 +365,49 @@ _dbus_read_socket_with_unix_fds (int               fd,
       for (cm = CMSG_FIRSTHDR(&m); cm; cm = CMSG_NXTHDR(&m, cm))
         if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS)
           {
-            unsigned i;
+            size_t i;
+            int *payload = (int *) CMSG_DATA (cm);
+            size_t payload_len_bytes = (cm->cmsg_len - CMSG_LEN (0));
+            size_t payload_len_fds = payload_len_bytes / sizeof (int);
+            size_t fds_to_use;
 
-            _dbus_assert(cm->cmsg_len <= CMSG_LEN(*n_fds * sizeof(int)));
-            *n_fds = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            /* Every non-negative int fits in a size_t without truncation,
+             * and we already know that *n_fds is non-negative, so
+             * casting (size_t) *n_fds is OK */
+            _DBUS_STATIC_ASSERT (sizeof (size_t) >= sizeof (int));
 
-            memcpy(fds, CMSG_DATA(cm), *n_fds * sizeof(int));
+            if (_DBUS_LIKELY (payload_len_fds <= (size_t) *n_fds))
+              {
+                /* The fds in the payload will fit in our buffer */
+                fds_to_use = payload_len_fds;
+              }
+            else
+              {
+                /* Too many fds in the payload. This shouldn't happen
+                 * any more because we're setting m.msg_controllen to
+                 * the exact number we can accept, but be safe and
+                 * truncate. */
+                fds_to_use = (size_t) *n_fds;
+
+                /* Close the excess fds to avoid DoS: if they stayed open,
+                 * someone could send us an extra fd per message
+                 * and we'd eventually run out. */
+                for (i = fds_to_use; i < payload_len_fds; i++)
+                  {
+                    close (payload[i]);
+                  }
+              }
+
+            memcpy (fds, payload, fds_to_use * sizeof (int));
             found = TRUE;
+            /* This cannot overflow because we have chosen fds_to_use
+             * to be <= *n_fds */
+            *n_fds = (int) fds_to_use;
 
             /* Linux doesn't tell us whether MSG_CMSG_CLOEXEC actually
                worked, hence we need to go through this list and set
                CLOEXEC everywhere in any case */
-            for (i = 0; i < *n_fds; i++)
+            for (i = 0; i < fds_to_use; i++)
               _dbus_fd_set_close_on_exec(fds[i]);
 
             break;
@@ -734,7 +778,7 @@ _dbus_write_two (int               fd,
   }
 #else /* HAVE_WRITEV */
   {
-    int ret1;
+    int ret1, ret2;
 
     ret1 = _dbus_write (fd, buffer1, start1, len1);
     if (ret1 == len1 && buffer2 != NULL)
@@ -885,16 +929,24 @@ _dbus_connect_exec (const char     *path,
 {
   int fds[2];
   pid_t pid;
+  int retval;
+  dbus_bool_t cloexec_done = 0;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
   _dbus_verbose ("connecting to process %s\n", path);
 
-  if (socketpair (AF_UNIX, SOCK_STREAM
 #ifdef SOCK_CLOEXEC
-                  |SOCK_CLOEXEC
+  retval = socketpair (AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, fds);
+  cloexec_done = (retval >= 0);
+
+  if (retval < 0 && (errno == EINVAL || errno == EPROTOTYPE))
 #endif
-                  , 0, fds) < 0)
+    {
+      retval = socketpair (AF_UNIX, SOCK_STREAM, 0, fds);
+    }
+
+  if (retval < 0)
     {
       dbus_set_error (error,
                       _dbus_error_from_errno (errno),
@@ -903,8 +955,11 @@ _dbus_connect_exec (const char     *path,
       return -1;
     }
 
-  _dbus_fd_set_close_on_exec (fds[0]);
-  _dbus_fd_set_close_on_exec (fds[1]);
+  if (!cloexec_done)
+    {
+      _dbus_fd_set_close_on_exec (fds[0]);
+      _dbus_fd_set_close_on_exec (fds[1]);
+    }
 
   pid = fork ();
   if (pid < 0)
@@ -957,39 +1012,6 @@ _dbus_connect_exec (const char     *path,
 }
 
 /**
- * Enables or disables the reception of credentials on the given socket during
- * the next message transmission.  This is only effective if the #LOCAL_CREDS
- * system feature exists, in which case the other side of the connection does
- * not have to do anything special to send the credentials.
- *
- * @param fd socket on which to change the #LOCAL_CREDS flag.
- * @param on whether to enable or disable the #LOCAL_CREDS flag.
- */
-static dbus_bool_t
-_dbus_set_local_creds (int fd, dbus_bool_t on)
-{
-  dbus_bool_t retval = TRUE;
-
-#if defined(HAVE_CMSGCRED)
-  /* NOOP just to make sure only one codepath is used
-   *      and to prefer CMSGCRED
-   */
-#elif defined(LOCAL_CREDS)
-  int val = on ? 1 : 0;
-  if (setsockopt (fd, 0, LOCAL_CREDS, &val, sizeof (val)) < 0)
-    {
-      _dbus_verbose ("Unable to set LOCAL_CREDS socket option on fd %d\n", fd);
-      retval = FALSE;
-    }
-  else
-    _dbus_verbose ("LOCAL_CREDS %s for further messages on fd %d\n",
-                   on ? "enabled" : "disabled", fd);
-#endif
-
-  return retval;
-}
-
-/**
  * Creates a socket and binds it to the given path,
  * then listens on the socket. The socket is
  * set to be nonblocking.
@@ -1014,7 +1036,6 @@ _dbus_listen_unix_socket (const char     *path,
   int listen_fd;
   struct sockaddr_un addr;
   size_t path_len;
-  unsigned int reuseaddr;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
@@ -1089,13 +1110,6 @@ _dbus_listen_unix_socket (const char     *path,
       strncpy (addr.sun_path, path, path_len);
     }
 
-  reuseaddr = 1;
-  if (setsockopt  (listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr))==-1)
-    {
-      _dbus_warn ("Failed to set socket option\"%s\": %s",
-                  path, _dbus_strerror (errno));
-    }
-
   if (bind (listen_fd, (struct sockaddr*) &addr, _DBUS_STRUCT_OFFSET (struct sockaddr_un, sun_path) + path_len) < 0)
     {
       dbus_set_error (error, _dbus_error_from_errno (errno),
@@ -1111,15 +1125,6 @@ _dbus_listen_unix_socket (const char     *path,
                       "Failed to listen on socket \"%s\": %s",
                       path, _dbus_strerror (errno));
       _dbus_close (listen_fd, NULL);
-      return -1;
-    }
-
-  if (!_dbus_set_local_creds (listen_fd, TRUE))
-    {
-      dbus_set_error (error, _dbus_error_from_errno (errno),
-                      "Failed to enable LOCAL_CREDS on socket \"%s\": %s",
-                      path, _dbus_strerror (errno));
-      close (listen_fd);
       return -1;
     }
 
@@ -1146,7 +1151,7 @@ _dbus_listen_unix_socket (const char     *path,
  *
  * This will set FD_CLOEXEC for the sockets returned.
  *
- * @oaram fds the file descriptors
+ * @param fds the file descriptors
  * @param error return location for errors
  * @returns the number of file descriptors
  */
@@ -1208,14 +1213,6 @@ _dbus_listen_systemd_sockets (int       **fds,
 
   for (fd = SD_LISTEN_FDS_START; fd < SD_LISTEN_FDS_START + n; fd ++)
     {
-      if (!_dbus_set_local_creds (fd, TRUE))
-        {
-          dbus_set_error (error, _dbus_error_from_errno (errno),
-                          "Failed to enable LOCAL_CREDS on systemd socket: %s",
-                          _dbus_strerror (errno));
-          goto fail;
-        }
-
       if (!_dbus_set_fd_nonblocking (fd, error))
         {
           _DBUS_ASSERT_ERROR_IS_SET (error);
@@ -1604,13 +1601,19 @@ write_credentials_byte (int             server_fd,
                            |MSG_NOSIGNAL
 #endif
                            );
-#else
-  bytes_written = send (server_fd, buf, 1, 0
+
+  /* If we HAVE_CMSGCRED, the OS still might not let us sendmsg()
+   * with a SOL_SOCKET/SCM_CREDS message - for instance, FreeBSD
+   * only allows that on AF_UNIX. Try just doing a send() instead. */
+  if (bytes_written < 0 && errno == EINVAL)
+#endif
+    {
+      bytes_written = send (server_fd, buf, 1, 0
 #if HAVE_DECL_MSG_NOSIGNAL
-                        |MSG_NOSIGNAL
+                            |MSG_NOSIGNAL
 #endif
-                        );
-#endif
+                            );
+    }
 
   if (bytes_written < 0 && errno == EINTR)
     goto again;
@@ -1674,12 +1677,6 @@ _dbus_read_credentials_socket  (int              client_fd,
     struct cmsghdr hdr;
     char cred[CMSG_SPACE (sizeof (struct cmsgcred))];
   } cmsg;
-
-#elif defined(LOCAL_CREDS)
-  struct {
-    struct cmsghdr hdr;
-    struct sockcred cred;
-  } cmsg;
 #endif
 
   uid_read = DBUS_UID_UNSET;
@@ -1697,12 +1694,6 @@ _dbus_read_credentials_socket  (int              client_fd,
 
   _dbus_credentials_clear (credentials);
 
-  /* Systems supporting LOCAL_CREDS are configured to have this feature
-   * enabled (if it does not conflict with HAVE_CMSGCRED) prior accepting
-   * the connection.  Therefore, the received message must carry the
-   * credentials information without doing anything special.
-   */
-
   iov.iov_base = &buf;
   iov.iov_len = 1;
 
@@ -1710,7 +1701,7 @@ _dbus_read_credentials_socket  (int              client_fd,
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
 
-#if defined(HAVE_CMSGCRED) || defined(LOCAL_CREDS)
+#if defined(HAVE_CMSGCRED)
   _DBUS_ZERO(cmsg);
   msg.msg_control = (caddr_t) &cmsg;
   msg.msg_controllen = CMSG_SPACE (sizeof (struct cmsgcred));
@@ -1750,20 +1741,18 @@ _dbus_read_credentials_socket  (int              client_fd,
       return FALSE;
     }
 
-#if defined(HAVE_CMSGCRED) || defined(LOCAL_CREDS)
-  if (cmsg.hdr.cmsg_len < CMSG_LEN (sizeof (struct cmsgcred))
-		  || cmsg.hdr.cmsg_type != SCM_CREDS)
-    {
-      dbus_set_error (error, DBUS_ERROR_FAILED,
-                      "Message from recvmsg() was not SCM_CREDS");
-      return FALSE;
-    }
-#endif
-
   _dbus_verbose ("read credentials byte\n");
 
   {
 #ifdef SO_PEERCRED
+    /* Supported by at least Linux and OpenBSD, with minor differences.
+     *
+     * This mechanism passes the process ID through and does not require
+     * the peer's cooperation, so we prefer it over all others. Notably,
+     * Linux also supports SCM_CREDENTIALS, which is similar to FreeBSD
+     * SCM_CREDS; it's implemented in GIO, but we don't use it in dbus at all,
+     * because this is much less fragile.
+     */
 #ifdef __OpenBSD__
     struct sockpeercred cr;
 #else
@@ -1783,29 +1772,36 @@ _dbus_read_credentials_socket  (int              client_fd,
 		       cr_len, (int) sizeof (cr), _dbus_strerror (errno));
       }
 #elif defined(HAVE_CMSGCRED)
+    /* We only check for HAVE_CMSGCRED, but we're really assuming that the
+     * presence of that struct implies SCM_CREDS. Supported by at least
+     * FreeBSD and DragonflyBSD.
+     *
+     * This mechanism requires the peer to help us (it has to send us a
+     * SCM_CREDS message) but it does pass the process ID through,
+     * which makes it better than getpeereid().
+     */
     struct cmsgcred *cred;
+    struct cmsghdr *cmsgp;
 
-    cred = (struct cmsgcred *) CMSG_DATA (&cmsg.hdr);
-    pid_read = cred->cmcred_pid;
-    uid_read = cred->cmcred_euid;
-#elif defined(LOCAL_CREDS)
-    pid_read = DBUS_PID_UNSET;
-    uid_read = cmsg.cred.sc_uid;
-    /* Since we have already got the credentials from this socket, we can
-     * disable its LOCAL_CREDS flag if it was ever set. */
-    _dbus_set_local_creds (client_fd, FALSE);
-#elif defined(HAVE_GETPEEREID)
-    uid_t euid;
-    gid_t egid;
-    if (getpeereid (client_fd, &euid, &egid) == 0)
+    for (cmsgp = CMSG_FIRSTHDR (&msg);
+         cmsgp != NULL;
+         cmsgp = CMSG_NXTHDR (&msg, cmsgp))
       {
-        uid_read = euid;
+        if (cmsgp->cmsg_type == SCM_CREDS &&
+            cmsgp->cmsg_level == SOL_SOCKET &&
+            cmsgp->cmsg_len >= CMSG_LEN (sizeof (struct cmsgcred)))
+          {
+            cred = (struct cmsgcred *) CMSG_DATA (cmsgp);
+            pid_read = cred->cmcred_pid;
+            uid_read = cred->cmcred_euid;
+            break;
+          }
       }
-    else
-      {
-        _dbus_verbose ("Failed to getpeereid() credentials: %s\n", _dbus_strerror (errno));
-      }
+
 #elif defined(HAVE_GETPEERUCRED)
+    /* Supported in at least Solaris >= 10. It should probably be higher
+     * up this list, because it carries the pid and we use this code path
+     * for audit data. */
     ucred_t * ucred = NULL;
     if (getpeerucred (client_fd, &ucred) == 0)
       {
@@ -1849,7 +1845,54 @@ _dbus_read_credentials_socket  (int              client_fd,
       }
     if (ucred != NULL)
       ucred_free (ucred);
-#else /* !SO_PEERCRED && !HAVE_CMSGCRED && !HAVE_GETPEEREID && !HAVE_GETPEERUCRED */
+
+    /* ----------------------------------------------------------------
+     * When adding new mechanisms, please add them above this point
+     * if they support passing the process ID through, or below if not.
+     * ---------------------------------------------------------------- */
+
+#elif defined(HAVE_GETPEEREID)
+    /* getpeereid() originates from D.J. Bernstein and is fairly
+     * widely-supported. According to a web search, it might be present in
+     * any/all of:
+     *
+     * - AIX?
+     * - Blackberry?
+     * - Cygwin
+     * - FreeBSD 4.6+ (but we prefer SCM_CREDS: it carries the pid)
+     * - Mac OS X
+     * - Minix 3.1.8+
+     * - MirBSD?
+     * - NetBSD 5.0+ (but LOCAL_PEEREID would be better: it carries the pid)
+     * - OpenBSD 3.0+ (but we prefer SO_PEERCRED: it carries the pid)
+     * - QNX?
+     */
+    uid_t euid;
+    gid_t egid;
+    if (getpeereid (client_fd, &euid, &egid) == 0)
+      {
+        uid_read = euid;
+      }
+    else
+      {
+        _dbus_verbose ("Failed to getpeereid() credentials: %s\n", _dbus_strerror (errno));
+      }
+#else /* no supported mechanism */
+
+#warning Socket credentials not supported on this Unix OS
+#warning Please tell https://bugs.freedesktop.org/enter_bug.cgi?product=DBus
+
+    /* Please add other operating systems known to support at least one of
+     * the mechanisms above to this list, keeping alphabetical order.
+     * Everything not in this list  is best-effort.
+     */
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || \
+    defined(__linux__) || \
+    defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+# error Credentials passing not working on this OS is a regression!
+#endif
+
     _dbus_verbose ("Socket credentials not supported on this OS\n");
 #endif
   }
@@ -1863,7 +1906,7 @@ _dbus_read_credentials_socket  (int              client_fd,
 
   if (pid_read != DBUS_PID_UNSET)
     {
-      if (!_dbus_credentials_add_unix_pid (credentials, pid_read))
+      if (!_dbus_credentials_add_pid (credentials, pid_read))
         {
           _DBUS_SET_OOM (error);
           return FALSE;
@@ -1935,11 +1978,15 @@ _dbus_accept  (int listen_fd)
  retry:
 
 #ifdef HAVE_ACCEPT4
-  /* We assume that if accept4 is available SOCK_CLOEXEC is too */
+  /*
+   * At compile-time, we assume that if accept4() is available in
+   * libc headers, SOCK_CLOEXEC is too. At runtime, it is still
+   * not necessarily true that either is supported by the running kernel.
+   */
   client_fd = accept4 (listen_fd, &addr, &addrlen, SOCK_CLOEXEC);
   cloexec_done = client_fd >= 0;
 
-  if (client_fd < 0 && errno == ENOSYS)
+  if (client_fd < 0 && (errno == ENOSYS || errno == EINVAL))
 #endif
     {
       client_fd = accept (listen_fd, &addr, &addrlen);
@@ -1986,6 +2033,16 @@ _dbus_check_dir_is_private_to_user (DBusString *dir, DBusError *error)
       dbus_set_error (error, _dbus_error_from_errno (errno),
                       "%s", _dbus_strerror (errno));
 
+      return FALSE;
+    }
+
+  if (sb.st_uid != geteuid ())
+    {
+      dbus_set_error (error, DBUS_ERROR_FAILED,
+                     "%s directory is owned by user %lu, not %lu",
+                     directory,
+                     (unsigned long) sb.st_uid,
+                     (unsigned long) geteuid ());
       return FALSE;
     }
 
@@ -2318,7 +2375,7 @@ _dbus_credentials_add_from_current_process (DBusCredentials *credentials)
   _dbus_assert (sizeof (uid_t) <= sizeof (dbus_uid_t));
   _dbus_assert (sizeof (gid_t) <= sizeof (dbus_gid_t));
 
-  if (!_dbus_credentials_add_unix_pid(credentials, _dbus_getpid()))
+  if (!_dbus_credentials_add_pid(credentials, _dbus_getpid()))
     return FALSE;
   if (!_dbus_credentials_add_unix_uid(credentials, _dbus_geteuid()))
     return FALSE;
@@ -2425,7 +2482,12 @@ _dbus_parse_uid (const DBusString      *uid_str,
 }
 
 #if !DBUS_USE_SYNC
-_DBUS_DEFINE_GLOBAL_LOCK (atomic);
+/* To be thread-safe by default on platforms that don't necessarily have
+ * atomic operations (notably Debian armel, which is armv4t), we must
+ * use a mutex that can be initialized statically, like this.
+ * GLib >= 2.32 uses a similar system.
+ */
+static pthread_mutex_t atomic_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 /**
@@ -2441,10 +2503,12 @@ _dbus_atomic_inc (DBusAtomic *atomic)
   return __sync_add_and_fetch(&atomic->value, 1)-1;
 #else
   dbus_int32_t res;
-  _DBUS_LOCK (atomic);
+
+  pthread_mutex_lock (&atomic_mutex);
   res = atomic->value;
   atomic->value += 1;
-  _DBUS_UNLOCK (atomic);
+  pthread_mutex_unlock (&atomic_mutex);
+
   return res;
 #endif
 }
@@ -2463,10 +2527,11 @@ _dbus_atomic_dec (DBusAtomic *atomic)
 #else
   dbus_int32_t res;
 
-  _DBUS_LOCK (atomic);
+  pthread_mutex_lock (&atomic_mutex);
   res = atomic->value;
   atomic->value -= 1;
-  _DBUS_UNLOCK (atomic);
+  pthread_mutex_unlock (&atomic_mutex);
+
   return res;
 #endif
 }
@@ -2487,9 +2552,10 @@ _dbus_atomic_get (DBusAtomic *atomic)
 #else
   dbus_int32_t res;
 
-  _DBUS_LOCK (atomic);
+  pthread_mutex_lock (&atomic_mutex);
   res = atomic->value;
-  _DBUS_UNLOCK (atomic);
+  pthread_mutex_unlock (&atomic_mutex);
+
   return res;
 #endif
 }
@@ -2913,6 +2979,7 @@ _dbus_close (int        fd,
  * (i.e. avoids stdin/stdout/stderr). Sets O_CLOEXEC.
  *
  * @param fd the file descriptor to duplicate
+ * @param error address of error location.
  * @returns duplicated file descriptor
  * */
 int
@@ -3053,7 +3120,7 @@ _dbus_full_duplex_pipe (int        *fd1,
   retval = socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, fds);
   cloexec_done = retval >= 0;
 
-  if (retval < 0 && errno == EINVAL)
+  if (retval < 0 && (errno == EINVAL || errno == EPROTOTYPE))
 #endif
     {
       retval = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
@@ -3119,8 +3186,11 @@ _dbus_printf_string_upper_bound (const char *format,
   char static_buf[1024];
   int bufsize = sizeof (static_buf);
   int len;
+  va_list args_copy;
 
-  len = vsnprintf (static_buf, bufsize, format, args);
+  DBUS_VA_COPY (args_copy, args);
+  len = vsnprintf (static_buf, bufsize, format, args_copy);
+  va_end (args_copy);
 
   /* If vsnprintf() returned non-negative, then either the string fits in
    * static_buf, or this OS has the POSIX and C99 behaviour where vsnprintf
@@ -3136,8 +3206,12 @@ _dbus_printf_string_upper_bound (const char *format,
        * or the real length could be coincidentally the same. Which is it?
        * If vsnprintf returns the truncated length, we'll go to the slow
        * path. */
-      if (vsnprintf (static_buf, 1, format, args) == 1)
+      DBUS_VA_COPY (args_copy, args);
+
+      if (vsnprintf (static_buf, 1, format, args_copy) == 1)
         len = -1;
+
+      va_end (args_copy);
     }
 
   /* If vsnprintf() returned negative, we have to do more work.
@@ -3153,7 +3227,10 @@ _dbus_printf_string_upper_bound (const char *format,
       if (buf == NULL)
         return -1;
 
-      len = vsnprintf (buf, bufsize, format, args);
+      DBUS_VA_COPY (args_copy, args);
+      len = vsnprintf (buf, bufsize, format, args_copy);
+      va_end (args_copy);
+
       dbus_free (buf);
 
       /* If the reported length is exactly the buffer size, round up to the
@@ -3170,12 +3247,16 @@ _dbus_printf_string_upper_bound (const char *format,
  * Gets the temporary files directory by inspecting the environment variables
  * TMPDIR, TMP, and TEMP in that order. If none of those are set "/tmp" is returned
  *
- * @returns location of temp directory
+ * @returns location of temp directory, or #NULL if no memory for locking
  */
 const char*
 _dbus_get_tmpdir(void)
 {
+  /* Protected by _DBUS_LOCK_sysdeps */
   static const char* tmpdir = NULL;
+
+  if (!_DBUS_LOCK (sysdeps))
+    return NULL;
 
   if (tmpdir == NULL)
     {
@@ -3199,11 +3280,14 @@ _dbus_get_tmpdir(void)
         tmpdir = "/tmp";
     }
 
+  _DBUS_UNLOCK (sysdeps);
+
   _dbus_assert(tmpdir != NULL);
 
   return tmpdir;
 }
 
+#if defined(DBUS_ENABLE_X11_AUTOLAUNCH) || defined(DBUS_ENABLE_LAUNCHD)
 /**
  * Execute a subprocess, returning up to 1024 bytes of output
  * into @p result.
@@ -3300,15 +3384,12 @@ _read_subprocess_line_argv (const char *progpath,
       /* set-up stdXXX */
       close (result_pipe[READ_END]);
       close (errors_pipe[READ_END]);
-      close (0);                /* close stdin */
-      close (1);                /* close stdout */
-      close (2);                /* close stderr */
 
-      if (dup2 (fd, 0) == -1)
+      if (dup2 (fd, 0) == -1) /* setup stdin */
         _exit (1);
-      if (dup2 (result_pipe[WRITE_END], 1) == -1)
+      if (dup2 (result_pipe[WRITE_END], 1) == -1) /* setup stdout */
         _exit (1);
-      if (dup2 (errors_pipe[WRITE_END], 2) == -1)
+      if (dup2 (errors_pipe[WRITE_END], 2) == -1) /* setup stderr */
         _exit (1);
 
       _dbus_close_all ();
@@ -3408,6 +3489,7 @@ _read_subprocess_line_argv (const char *progpath,
 
   return retval;
 }
+#endif
 
 /**
  * Returns the address of a new session bus.
@@ -3416,6 +3498,7 @@ _read_subprocess_line_argv (const char *progpath,
  * address. If a failure happens, returns #FALSE and
  * sets an error in @p error.
  *
+ * @param scope scope of autolaunch (Windows only)
  * @param address a DBusString where the address can be stored
  * @param error a DBusError to store the error in case of failure
  * @returns #TRUE on success, #FALSE if an error happened
@@ -3430,10 +3513,17 @@ _dbus_get_autolaunch_address (const char *scope,
    * but that's done elsewhere, and if it worked, this function wouldn't
    * be called.) */
   const char *display;
-  static char *argv[6];
+  char *argv[6];
   int i;
   DBusString uuid;
   dbus_bool_t retval;
+
+  if (_dbus_check_setuid ())
+    {
+      dbus_set_error_const (error, DBUS_ERROR_NOT_SUPPORTED,
+                            "Unable to autolaunch when setuid");
+      return FALSE;
+    }
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
   retval = FALSE;
@@ -3463,7 +3553,12 @@ _dbus_get_autolaunch_address (const char *scope,
     }
 
   i = 0;
-  argv[i] = "dbus-launch";
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
+  if (_dbus_getenv ("DBUS_USE_TEST_BINARY") != NULL)
+    argv[i] = TEST_BUS_LAUNCH_BINARY;
+  else
+#endif
+    argv[i] = DBUS_BINDIR "/dbus-launch";
   ++i;
   argv[i] = "--autolaunch";
   ++i;
@@ -3478,7 +3573,7 @@ _dbus_get_autolaunch_address (const char *scope,
 
   _dbus_assert (i == _DBUS_N_ELEMENTS (argv));
 
-  retval = _read_subprocess_line_argv (DBUS_BINDIR "/dbus-launch",
+  retval = _read_subprocess_line_argv (argv[0],
                                        TRUE,
                                        argv, address, error);
 
@@ -3521,7 +3616,7 @@ _dbus_read_local_machine_uuid (DBusGUID   *machine_id,
 
   _dbus_string_init_const (&filename, DBUS_MACHINE_UUID_FILE);
 
-  b = _dbus_read_uuid_file (&filename, machine_id, create_if_not_found, error);
+  b = _dbus_read_uuid_file (&filename, machine_id, FALSE, error);
   if (b)
     return TRUE;
 
@@ -3529,14 +3624,31 @@ _dbus_read_local_machine_uuid (DBusGUID   *machine_id,
 
   /* Fallback to the system machine ID */
   _dbus_string_init_const (&filename, "/etc/machine-id");
-  return _dbus_read_uuid_file (&filename, machine_id, FALSE, error);
-}
+  b = _dbus_read_uuid_file (&filename, machine_id, FALSE, error);
 
-#define DBUS_UNIX_STANDARD_SESSION_SERVICEDIR "/dbus-1/services"
-#define DBUS_UNIX_STANDARD_SYSTEM_SERVICEDIR "/dbus-1/system-services"
+  if (b)
+    {
+      /* try to copy it to the DBUS_MACHINE_UUID_FILE, but do not
+       * complain if that isn't possible for whatever reason */
+      _dbus_string_init_const (&filename, DBUS_MACHINE_UUID_FILE);
+      _dbus_write_uuid_file (&filename, machine_id, NULL);
+
+      return TRUE;
+    }
+
+  if (!create_if_not_found)
+    return FALSE;
+
+  /* if none found, try to make a new one */
+  dbus_error_free (error);
+  _dbus_string_init_const (&filename, DBUS_MACHINE_UUID_FILE);
+  _dbus_generate_uuid (machine_id);
+  return _dbus_write_uuid_file (&filename, machine_id, error);
+}
 
 /**
  * quries launchd for a specific env var which holds the socket path.
+ * @param socket_path append the socket path to this DBusString
  * @param launchd_env_var the env var to look up
  * @param error a DBusError to store the error in case of failure
  * @return the value of the env var
@@ -3551,6 +3663,13 @@ _dbus_lookup_launchd_socket (DBusString *socket_path,
   int i;
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+
+  if (_dbus_check_setuid ())
+    {
+      dbus_set_error_const (error, DBUS_ERROR_NOT_SUPPORTED,
+                            "Unable to find launchd socket when setuid");
+      return FALSE;
+    }
 
   i = 0;
   argv[i] = "launchctl";
@@ -3591,6 +3710,13 @@ _dbus_lookup_session_address_launchd (DBusString *address, DBusError  *error)
 {
   dbus_bool_t valid_socket;
   DBusString socket_path;
+
+  if (_dbus_check_setuid ())
+    {
+      dbus_set_error_const (error, DBUS_ERROR_NOT_SUPPORTED,
+                            "Unable to find launchd socket when setuid");
+      return FALSE;
+    }
 
   if (!_dbus_string_init (&socket_path))
     {
@@ -3671,167 +3797,6 @@ _dbus_lookup_session_address (dbus_bool_t *supported,
 }
 
 /**
- * Returns the standard directories for a session bus to look for service
- * activation files
- *
- * On UNIX this should be the standard xdg freedesktop.org data directories:
- *
- * XDG_DATA_HOME=${XDG_DATA_HOME-$HOME/.local/share}
- * XDG_DATA_DIRS=${XDG_DATA_DIRS-/usr/local/share:/usr/share}
- *
- * and
- *
- * DBUS_DATADIR
- *
- * @param dirs the directory list we are returning
- * @returns #FALSE on OOM
- */
-
-dbus_bool_t
-_dbus_get_standard_session_servicedirs (DBusList **dirs)
-{
-  const char *xdg_data_home;
-  const char *xdg_data_dirs;
-  DBusString servicedir_path;
-
-  if (!_dbus_string_init (&servicedir_path))
-    return FALSE;
-
-  xdg_data_home = _dbus_getenv ("XDG_DATA_HOME");
-  xdg_data_dirs = _dbus_getenv ("XDG_DATA_DIRS");
-
-  if (xdg_data_home != NULL)
-    {
-      if (!_dbus_string_append (&servicedir_path, xdg_data_home))
-        goto oom;
-    }
-  else
-    {
-      const DBusString *homedir;
-      DBusString local_share;
-
-      if (!_dbus_homedir_from_current_process (&homedir))
-        goto oom;
-
-      if (!_dbus_string_append (&servicedir_path, _dbus_string_get_const_data (homedir)))
-        goto oom;
-
-      _dbus_string_init_const (&local_share, "/.local/share");
-      if (!_dbus_concat_dir_and_file (&servicedir_path, &local_share))
-        goto oom;
-    }
-
-  if (!_dbus_string_append (&servicedir_path, ":"))
-    goto oom;
-
-  if (xdg_data_dirs != NULL)
-    {
-      if (!_dbus_string_append (&servicedir_path, xdg_data_dirs))
-        goto oom;
-
-      if (!_dbus_string_append (&servicedir_path, ":"))
-        goto oom;
-    }
-  else
-    {
-      if (!_dbus_string_append (&servicedir_path, "/usr/local/share:/usr/share:"))
-        goto oom;
-    }
-
-  /*
-   * add configured datadir to defaults
-   * this may be the same as an xdg dir
-   * however the config parser should take
-   * care of duplicates
-   */
-  if (!_dbus_string_append (&servicedir_path, DBUS_DATADIR))
-    goto oom;
-
-  if (!_dbus_split_paths_and_append (&servicedir_path,
-                                     DBUS_UNIX_STANDARD_SESSION_SERVICEDIR,
-                                     dirs))
-    goto oom;
-
-  _dbus_string_free (&servicedir_path);
-  return TRUE;
-
- oom:
-  _dbus_string_free (&servicedir_path);
-  return FALSE;
-}
-
-
-/**
- * Returns the standard directories for a system bus to look for service
- * activation files
- *
- * On UNIX this should be the standard xdg freedesktop.org data directories:
- *
- * XDG_DATA_DIRS=${XDG_DATA_DIRS-/usr/local/share:/usr/share}
- *
- * and
- *
- * DBUS_DATADIR
- *
- * On Windows there is no system bus and this function can return nothing.
- *
- * @param dirs the directory list we are returning
- * @returns #FALSE on OOM
- */
-
-dbus_bool_t
-_dbus_get_standard_system_servicedirs (DBusList **dirs)
-{
-  /*
-   * DBUS_DATADIR may be the same as one of the standard directories. However,
-   * the config parser should take care of the duplicates.
-   *
-   * Also, append /lib as counterpart of /usr/share on the root
-   * directory (the root directory does not know /share), in order to
-   * facilitate early boot system bus activation where /usr might not
-   * be available.
-   */
-  static const char standard_search_path[] =
-    "/usr/local/share:"
-    "/usr/share:"
-    DBUS_DATADIR ":"
-    "/lib";
-  DBusString servicedir_path;
-
-  _dbus_string_init_const (&servicedir_path, standard_search_path);
-
-  return _dbus_split_paths_and_append (&servicedir_path,
-                                       DBUS_UNIX_STANDARD_SYSTEM_SERVICEDIR,
-                                       dirs);
-}
-
-/**
- * Append the absolute path of the system.conf file
- * (there is no system bus on Windows so this can just
- * return FALSE and print a warning or something)
- *
- * @param str the string to append to
- * @returns #FALSE if no memory
- */
-dbus_bool_t
-_dbus_append_system_config_file (DBusString *str)
-{
-  return _dbus_string_append (str, DBUS_SYSTEM_CONFIG_FILE);
-}
-
-/**
- * Append the absolute path of the session.conf file.
- *
- * @param str the string to append to
- * @returns #FALSE if no memory
- */
-dbus_bool_t
-_dbus_append_session_config_file (DBusString *str)
-{
-  return _dbus_string_append (str, DBUS_SESSION_CONFIG_FILE);
-}
-
-/**
  * Called when the bus daemon is signaled to reload its configuration; any
  * caches should be nuked. Of course any caches that need explicit reload
  * are probably broken, but c'est la vie.
@@ -3877,7 +3842,7 @@ _dbus_append_keyring_directory_for_credentials (DBusString      *directory,
   if (!_dbus_homedir_from_uid (uid, &homedir))
     goto failed;
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
   {
     const char *override;
 
@@ -3893,6 +3858,8 @@ _dbus_append_keyring_directory_for_credentials (DBusString      *directory,
       }
     else
       {
+        /* Not strictly thread-safe, but if we fail at thread-safety here,
+         * the worst that will happen is some extra warnings. */
         static dbus_bool_t already_warned = FALSE;
         if (!already_warned)
           {
@@ -4008,20 +3975,6 @@ _dbus_socket_can_pass_unix_fd(int fd) {
 #endif
 }
 
-
-/*
- * replaces the term DBUS_PREFIX in configure_time_path by the
- * current dbus installation directory. On unix this function is a noop
- *
- * @param configure_time_path
- * @return real path
- */
-const char *
-_dbus_replace_install_prefix (const char *configure_time_path)
-{
-  return configure_time_path;
-}
-
 /**
  * Closes all file descriptors except the first three (i.e. stdin,
  * stdout, stderr).
@@ -4088,6 +4041,61 @@ _dbus_close_all (void)
 }
 
 /**
+ * **NOTE**: If you modify this function, please also consider making
+ * the corresponding change in GLib.  See
+ * glib/gutils.c:g_check_setuid().
+ *
+ * Returns TRUE if the current process was executed as setuid (or an
+ * equivalent __libc_enable_secure is available).  See:
+ * http://osdir.com/ml/linux.lfs.hardened/2007-04/msg00032.html
+ */
+dbus_bool_t
+_dbus_check_setuid (void)
+{
+  /* TODO: get __libc_enable_secure exported from glibc.
+   * See http://www.openwall.com/lists/owl-dev/2012/08/14/1
+   */
+#if 0 && defined(HAVE_LIBC_ENABLE_SECURE)
+  {
+    /* See glibc/include/unistd.h */
+    extern int __libc_enable_secure;
+    return __libc_enable_secure;
+  }
+#elif defined(HAVE_ISSETUGID)
+  /* BSD: http://www.freebsd.org/cgi/man.cgi?query=issetugid&sektion=2 */
+  return issetugid ();
+#else
+  uid_t ruid, euid, suid; /* Real, effective and saved user ID's */
+  gid_t rgid, egid, sgid; /* Real, effective and saved group ID's */
+
+  /* We call into this function from _dbus_threads_init_platform_specific()
+   * to make sure these are initialized before we start threading. */
+  static dbus_bool_t check_setuid_initialised;
+  static dbus_bool_t is_setuid;
+
+  if (_DBUS_UNLIKELY (!check_setuid_initialised))
+    {
+#ifdef HAVE_GETRESUID
+      if (getresuid (&ruid, &euid, &suid) != 0 ||
+          getresgid (&rgid, &egid, &sgid) != 0)
+#endif /* HAVE_GETRESUID */
+        {
+          suid = ruid = getuid ();
+          sgid = rgid = getgid ();
+          euid = geteuid ();
+          egid = getegid ();
+        }
+
+      check_setuid_initialised = TRUE;
+      is_setuid = (ruid != euid || ruid != suid ||
+                   rgid != egid || rgid != sgid);
+
+    }
+  return is_setuid;
+#endif
+}
+
+/**
  * Read the address from the socket and append it to the string
  *
  * @param fd the socket
@@ -4108,6 +4116,7 @@ _dbus_append_address_from_socket (int         fd,
   } socket;
   char hostip[INET6_ADDRSTRLEN];
   int size = sizeof (socket);
+  DBusString path_str;
 
   if (getsockname (fd, &socket.sa, &size))
     goto err;
@@ -4117,26 +4126,32 @@ _dbus_append_address_from_socket (int         fd,
     case AF_UNIX:
       if (socket.un.sun_path[0]=='\0')
         {
-          if (_dbus_string_append_printf (address, "unix:abstract=%s", &(socket.un.sun_path[1])))
+          _dbus_string_init_const (&path_str, &(socket.un.sun_path[1]));
+          if (_dbus_string_append (address, "unix:abstract=") &&
+              _dbus_address_append_escaped (address, &path_str))
             return TRUE;
         }
       else
         {
-          if (_dbus_string_append_printf (address, "unix:path=%s", socket.un.sun_path))
+          _dbus_string_init_const (&path_str, socket.un.sun_path);
+          if (_dbus_string_append (address, "unix:path=") &&
+              _dbus_address_append_escaped (address, &path_str))
             return TRUE;
         }
       break;
     case AF_INET:
       if (inet_ntop (AF_INET, &socket.ipv4.sin_addr, hostip, sizeof (hostip)))
         if (_dbus_string_append_printf (address, "tcp:family=ipv4,host=%s,port=%u",
-                   hostip, ntohs (socket.ipv4.sin_port)))
+                                        hostip, ntohs (socket.ipv4.sin_port)))
           return TRUE;
       break;
 #ifdef AF_INET6
     case AF_INET6:
+      _dbus_string_init_const (&path_str, hostip);
       if (inet_ntop (AF_INET6, &socket.ipv6.sin6_addr, hostip, sizeof (hostip)))
-        if (_dbus_string_append_printf (address, "tcp:family=ipv6,host=%s,port=%u",
-                   hostip, ntohs (socket.ipv6.sin6_port)))
+        if (_dbus_string_append_printf (address, "tcp:family=ipv6,port=%u,host=",
+                                        ntohs (socket.ipv6.sin6_port)) &&
+            _dbus_address_append_escaped (address, &path_str))
           return TRUE;
       break;
 #endif

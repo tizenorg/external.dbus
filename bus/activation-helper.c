@@ -40,6 +40,7 @@
 #include <pwd.h>
 #include <grp.h>
 
+#include <dbus/dbus-misc.h>
 #include <dbus/dbus-shell.h>
 #include <dbus/dbus-marshal-validate.h>
 
@@ -140,21 +141,12 @@ out_all:
   return desktop_file;
 }
 
-/* Cleares the environment, except for DBUS_VERBOSE and DBUS_STARTER_x */
+/* Clears the environment, except for DBUS_STARTER_x,
+ * which we hardcode to the system bus.
+ */
 static dbus_bool_t
 clear_environment (DBusError *error)
 {
-  const char *starter_env = NULL;
-#ifdef DBUS_ENABLE_VERBOSE_MODE
-  const char *debug_env = NULL;
-
-  /* are we debugging */
-  debug_env = _dbus_getenv ("DBUS_VERBOSE");
-#endif
-
-  /* we save the starter */
-  starter_env = _dbus_getenv ("DBUS_STARTER_ADDRESS");
-
 #ifndef ACTIVATION_LAUNCHER_TEST
   /* totally clear the environment */
   if (!_dbus_clearenv ())
@@ -163,20 +155,11 @@ clear_environment (DBusError *error)
                       "could not clear environment\n");
       return FALSE;
     }
+
+  /* Ensure the bus is set to system */
+  dbus_setenv ("DBUS_STARTER_ADDRESS", DBUS_SYSTEM_BUS_DEFAULT_ADDRESS);
+  dbus_setenv ("DBUS_STARTER_BUS_TYPE", "system");
 #endif
-
-#ifdef DBUS_ENABLE_VERBOSE_MODE
-  /* restore the debugging environment setting if set */
-  if (debug_env)
-    _dbus_setenv ("DBUS_VERBOSE", debug_env);
-#endif
-
-  /* restore the starter */
-  if (starter_env)
-    _dbus_setenv ("DBUS_STARTER_ADDRESS", starter_env);
-
-  /* set the type, which must be system if we got this far */
-  _dbus_setenv ("DBUS_STARTER_BUS_TYPE", "system");
 
   return TRUE;
 }
@@ -389,7 +372,7 @@ check_bus_name (const char *bus_name,
   _dbus_string_init_const (&str, bus_name);
   if (!_dbus_validate_bus_name (&str, 0, _dbus_string_get_length (&str)))
     {
-      dbus_set_error (error, DBUS_ERROR_SPAWN_SERVICE_NOT_FOUND,
+      dbus_set_error (error, DBUS_ERROR_SPAWN_SERVICE_INVALID,
                       "bus name '%s' is not a valid bus name\n",
                       bus_name);
       return FALSE;

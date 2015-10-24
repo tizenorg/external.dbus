@@ -1,0 +1,111 @@
+#!/bin/bash
+
+DBUS_SESSION_BUS_FILE=/tmp/dbus_bus_address
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+function add_to_ld_library_path {
+	if [ -z $LD_LIBRARY_PATH ]; then
+		LD_LIBRARY_PATH=$1
+	else
+		LD_LIBRARY_PATH+=:$1
+	fi
+}
+
+function print {
+	echo -ne "> "$@
+}
+
+function print_verbose {
+	[ x$V = "x1" ] && echo -ne "% "$@
+}
+
+function print_help {
+	echo "Script helps set env to run dbus tests.
+Use: $0 [opt-args] command
+Script prepare env and execute command with all args.
+opt-args:
+	-v        -> set DBUS_VERBOSE variable to 1
+	-f        -> set DBUS_SESSION_BUS_ADDRESS to string read from file $DBUS_SESSION_BUS_FILE
+	-F FILE   -> set DBUS_SESSION_BUS_ADDRESS to string read from file FILE
+	--kdbus   -> set DBUS_SESSION_BUS_ADDRESS to kernel:path=/dev/kdbus/<USER ID>-kdbus/bus
+	-l        -> add dir with script and working dir to LD_LIBRARY_PATH
+	-L DIR    -> add dir DIR to LD_LIBRARY_PATH
+	-s        -> redirect command stdout to file $DBUS_SESSION_BUS_FILE
+				 (can be use with dbus-daemon --print-address to store bus address in file)
+	-S FILE   -> redirect command stdout to file FILE"
+}
+
+if [ $# -eq 0 ]
+then
+	print_help
+	exit 0
+fi
+
+while test $# -gt 0
+do
+	arg=$1
+	next_arg=$2
+
+	case "$arg" in
+
+	-v)	DBUS_VERBOSE=1
+		;;
+
+	-f)	DBUS_SESSION_BUS_ADDRESS=`cat $DBUS_SESSION_BUS_FILE`
+		;;
+	-F)	DBUS_SESSION_BUS_ADDRESS=`cat $next_arg`
+		shift
+		;;
+	--kdbus)	DBUS_SESSION_BUS_ADDRESS=kernel:path=/dev/kdbus/`id -u`-kdbus/bus
+				;;
+
+	-l)	add_to_ld_library_path $DIR
+		PWD=$(pwd)
+		[ $PWD != $DIR ] && add_to_ld_library_path $PWD
+		;;
+	-L)	add_to_ld_library_path $next_arg
+		shift
+		;;
+
+	-s)	redirect_file=$DBUS_SESSION_BUS_FILE
+		;;
+	-S)	redirect_file=$next_arg
+		shift
+		;;
+
+	-h | --help)	print_help
+					exit 0
+					;;
+	-*) print "Not knowm argument: "$arg"\n"
+		exit 1
+		;;
+
+	*)	  break
+			;;
+	esac
+
+	shift
+done
+
+export DBUS_SESSION_BUS_ADDRESS
+export LD_LIBRARY_PATH
+export DBUS_VERBOSE
+
+print_verbose "DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"\n"
+print_verbose "LD_LIBRARY_PATH="$LD_LIBRARY_PATH"\n"
+print_verbose "DBUS_VERBOSE="$DBUS_VERBOSE"\n"
+print_verbose "redirect stdout to: "$redirect_file"\n"
+
+if [ $# -gt 0 ]
+then
+	run=$@
+	print_verbose "Running: "$run"\n\n"
+	if [ -z $redirect_file ]; then
+		$run
+	else
+		$run >$redirect_file
+	fi
+else
+	print "No args to start\n"
+fi

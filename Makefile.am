@@ -1,4 +1,4 @@
-SUBDIRS=dbus bus tools test doc
+SUBDIRS=dbus bus policy tools test doc samsung_tools
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = dbus-1.pc
@@ -7,6 +7,7 @@ DISTCLEANFILES = 		\
 	dbus-1.pc
 
 EXTRA_DIST =			\
+	autogen.sh		\
 	HACKING			\
 	dbus-1.pc.in		\
 	cleanup-man-pages.sh    \
@@ -14,6 +15,7 @@ EXTRA_DIST =			\
         NEWS.pre-1-0            \
 	ChangeLog.pre-1-2       \
         NEWS.pre-1-2		\
+	README.valgrind		\
 	README.win		\
 	README.wince		\
 	README.cygwin		\

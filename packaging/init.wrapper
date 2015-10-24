@@ -1,0 +1,29 @@
+#!/bin/sh
+
+if [ $$ = 1 ]; then
+	echo 'Checking system bus transport...'
+	#TODO: not very robust way to check bus transport type (ex. depends on service file layout, etc)
+	cat /usr/lib/systemd/system/dbus.service | grep -- '--address=kernel:' 1> /dev/null
+	if [ $? = 0 ]; then
+		echo 'Kdbus system bus found!'
+		export DBUS_SYSTEM_BUS_ADDRESS=kernel:path=/dev/kdbus/0-system/bus
+		export DBUS_SESSION_BUS_ADDRESS=kernel:path=/dev/kdbus/5000-user/bus
+	else
+		echo 'Standard dbus system bus'
+	fi
+fi
+
+. /etc/switch-init.conf
+
+if [ $$ = 1 ]; then
+	[ "$INIT" ] && exec "$INIT" "$@"
+
+	# configured init failed to boot, try to recover
+	[ -x /sbin/init.sysvinit ] && exec /sbin/init.sysvinit
+	[ ! -L /sbin/init ] && exec /sbin/init
+
+	echo "* FAILED TO BOOT CONFIGURED INIT ($INIT) *"
+	PS1='[recover system] ' exec /bin/sh
+fi
+
+exec /sbin/init.sysvinit "$@"

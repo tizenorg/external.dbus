@@ -135,7 +135,7 @@ check_write_watch (DBusTransport *transport)
   
   _dbus_transport_ref (transport);
 
-  if (_dbus_transport_get_is_authenticated (transport))
+  if (_dbus_transport_try_to_authenticate (transport))
     needed = _dbus_connection_has_messages_to_send_unlocked (transport->connection);
   else
     {
@@ -190,7 +190,7 @@ check_read_watch (DBusTransport *transport)
   
   _dbus_transport_ref (transport);
 
-  if (_dbus_transport_get_is_authenticated (transport))
+  if (_dbus_transport_try_to_authenticate (transport))
     need_read_watch =
       (_dbus_counter_get_size_value (transport->live_messages) < transport->max_live_messages_size) &&
       (_dbus_counter_get_unix_fd_value (transport->live_messages) < transport->max_live_messages_unix_fds);
@@ -255,8 +255,7 @@ read_data_into_auth (DBusTransport *transport,
   bytes_read = _dbus_read_socket (socket_transport->fd,
                                   buffer, socket_transport->max_bytes_read_per_iteration);
 
-  _dbus_auth_return_buffer (transport->auth, buffer,
-                            bytes_read > 0 ? bytes_read : 0);
+  _dbus_auth_return_buffer (transport->auth, buffer);
 
   if (bytes_read > 0)
     {
@@ -404,7 +403,7 @@ do_authentication (DBusTransport *transport,
 
   oom = FALSE;
   
-  orig_auth_state = _dbus_transport_get_is_authenticated (transport);
+  orig_auth_state = _dbus_transport_try_to_authenticate (transport);
 
   /* This is essential to avoid the check_write_watch() at the end,
    * we don't want to add a write watch in do_iteration before
@@ -419,7 +418,7 @@ do_authentication (DBusTransport *transport,
   
   _dbus_transport_ref (transport);
   
-  while (!_dbus_transport_get_is_authenticated (transport) &&
+  while (!_dbus_transport_try_to_authenticate (transport) &&
          _dbus_transport_get_is_connected (transport))
     {      
       if (!exchange_credentials (transport, do_reading, do_writing))
@@ -477,7 +476,7 @@ do_authentication (DBusTransport *transport,
 
  out:
   if (auth_completed)
-    *auth_completed = (orig_auth_state != _dbus_transport_get_is_authenticated (transport));
+    *auth_completed = (orig_auth_state != _dbus_transport_try_to_authenticate (transport));
   
   check_read_watch (transport);
   check_write_watch (transport);
@@ -498,7 +497,7 @@ do_writing (DBusTransport *transport)
   dbus_bool_t oom;
   
   /* No messages without authentication! */
-  if (!_dbus_transport_get_is_authenticated (transport))
+  if (!_dbus_transport_try_to_authenticate (transport))
     {
       _dbus_verbose ("Not authenticated, not writing anything\n");
       return TRUE;
@@ -646,12 +645,44 @@ do_writing (DBusTransport *transport)
         {
           /* EINTR already handled for us */
           
-          /* For some discussion of why we also ignore EPIPE here, see
+          /* If the other end closed the socket with close() or shutdown(), we
+           * receive EPIPE here but we must not close the socket yet: there
+           * might still be some data to read. See:
            * http://lists.freedesktop.org/archives/dbus/2008-March/009526.html
            */
           
           if (_dbus_get_is_errno_eagain_or_ewouldblock () || _dbus_get_is_errno_epipe ())
             goto out;
+
+          /* Since Linux commit 25888e (from 2.6.37-rc4, Nov 2010), sendmsg()
+           * on Unix sockets returns -1 errno=ETOOMANYREFS when the passfd
+           * mechanism (SCM_RIGHTS) is used recursively with a recursion level
+           * of maximum 4. The kernel does not have an API to check whether
+           * the passed fds can be forwarded and it can change asynchronously.
+           * See:
+           * https://bugs.freedesktop.org/show_bug.cgi?id=80163
+           */
+
+          else if (_dbus_get_is_errno_etoomanyrefs ())
+            {
+              /* We only send fds in the first byte of the message.
+               * ETOOMANYREFS cannot happen after.
+               */
+              _dbus_assert (socket_transport->message_bytes_written == 0);
+
+              _dbus_verbose (" discard message of %d bytes due to ETOOMANYREFS\n",
+                             total_bytes_to_write);
+
+              socket_transport->message_bytes_written = 0;
+              _dbus_string_set_length (&socket_transport->encoded_outgoing, 0);
+              _dbus_string_compact (&socket_transport->encoded_outgoing, 2048);
+
+              /* The message was not actually sent but it needs to be removed
+               * from the outgoing queue
+               */
+              _dbus_connection_message_sent_unlocked (transport->connection,
+                                                      message);
+            }
           else
             {
               _dbus_verbose ("Error writing to remote app: %s\n",
@@ -703,7 +734,7 @@ do_reading (DBusTransport *transport)
   _dbus_verbose ("fd = %d\n",socket_transport->fd);
   
   /* No messages without authentication! */
-  if (!_dbus_transport_get_is_authenticated (transport))
+  if (!_dbus_transport_try_to_authenticate (transport))
     return TRUE;
 
   oom = FALSE;
@@ -748,29 +779,23 @@ do_reading (DBusTransport *transport)
       
       if (bytes_read > 0)
         {
-          int orig_len;
-          
           _dbus_message_loader_get_buffer (transport->loader,
                                            &buffer);
 
-          orig_len = _dbus_string_get_length (buffer);
-          
           if (!_dbus_auth_decode_data (transport->auth,
                                        &socket_transport->encoded_incoming,
                                        buffer))
             {
               _dbus_verbose ("Out of memory decoding incoming data\n");
               _dbus_message_loader_return_buffer (transport->loader,
-                                              buffer,
-                                              _dbus_string_get_length (buffer) - orig_len);
+                                              buffer);
 
               oom = TRUE;
               goto out;
             }
 
           _dbus_message_loader_return_buffer (transport->loader,
-                                              buffer,
-                                              _dbus_string_get_length (buffer) - orig_len);
+                                              buffer);
 
           _dbus_string_set_length (&socket_transport->encoded_incoming, 0);
           _dbus_string_compact (&socket_transport->encoded_incoming, 2048);
@@ -789,7 +814,7 @@ do_reading (DBusTransport *transport)
           if (!_dbus_message_loader_get_unix_fds(transport->loader, &fds, &n_fds))
             {
               _dbus_verbose ("Out of memory reading file descriptors\n");
-              _dbus_message_loader_return_buffer (transport->loader, buffer, 0);
+              _dbus_message_loader_return_buffer (transport->loader, buffer);
               oom = TRUE;
               goto out;
             }
@@ -812,8 +837,7 @@ do_reading (DBusTransport *transport)
         }
 
       _dbus_message_loader_return_buffer (transport->loader,
-                                          buffer,
-                                          bytes_read < 0 ? 0 : bytes_read);
+                                          buffer);
     }
   
   if (bytes_read < 0)
@@ -1055,7 +1079,7 @@ socket_do_iteration (DBusTransport *transport,
   poll_fd.fd = socket_transport->fd;
   poll_fd.events = 0;
   
-  if (_dbus_transport_get_is_authenticated (transport))
+  if (_dbus_transport_try_to_authenticate (transport))
     {
       /* This is kind of a hack; if we have stuff to write, then try
        * to avoid the poll. This is probably about a 5% speedup on an
@@ -1299,7 +1323,7 @@ _dbus_transport_new_for_socket (int               fd,
  * @param host the host to connect to
  * @param port the port to connect to
  * @param family the address family to connect to
- * @param path to nonce file
+ * @param noncefile path to nonce file
  * @param error location to store reason for failure.
  * @returns a new transport, or #NULL on failure.
  */

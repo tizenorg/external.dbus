@@ -13,14 +13,14 @@ dbus-daemon-launch-helper-test
 *.bbg
 *.da
 *.gcov
-bus-test
+test-bus
 rc.messagebus
 messagebus
 messagebus-config
 session.conf
 system.conf
-bus-test-launch-helper
-bus-test-system
+test-bus-launch-helper
+test-bus-system
 dbus.service
 dbus.socket
 org.freedesktop.dbus-session.plist

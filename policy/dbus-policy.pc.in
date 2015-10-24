@@ -1,0 +1,16 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+sysconfdir=@EXPANDED_SYSCONFDIR@
+session_bus_services_dir=@EXPANDED_DATADIR@/dbus-1/services
+system_bus_services_dir=@EXPANDED_DATADIR@/dbus-1/system-services
+interfaces_dir=@EXPANDED_DATADIR@/dbus-1/interfaces
+daemondir=@DBUS_DAEMONDIR@
+
+Name: dbus-policy
+Description: A helper library for fine-grained userspace policy handling
+Version: @VERSION@
+Libs: -L${libdir} -ldbuspolicy-1
+Libs.private: @LIBDBUS_LIBS@
+Cflags: -I${includedir}/dbus-1.0 -I${libdir}/dbus-1.0/include @DBUS_STATIC_BUILD_CPPFLAGS@

@@ -5,8 +5,7 @@
 
 [Unit]
 Description=D-Bus Session Message Bus Socket
+ConditionPathExists=!/dev/kdbus/%U-user/bus
 
 [Socket]
 ListenStream=%t/dbus/user_bus_socket
-SmackLabelIPIn=*
-SmackLabelIPOut=@

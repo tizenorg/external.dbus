@@ -91,4 +91,5 @@ dbus_bool_t     bus_service_list_queued_owners        (BusService *service,
                                                        DBusError  *error);
 
 DBusConnection* bus_service_get_primary_owners_connection (BusService     *service);
+char*           bus_service_get_primary_owners_unique_name(BusService     *service);
 #endif /* BUS_SERVICES_H */

@@ -11,6 +11,11 @@ of patches, etc. should go there.
 Security
 ===
 
+If you find a security vulnerability that is not known to the public,
+please report it privately to dbus-security@lists.freedesktop.org
+or by reporting a freedesktop.org bug that is marked as
+restricted to the "D-BUS security group".
+
 Most of D-Bus is security sensitive.  Guidelines related to that:
 
  - avoid memcpy(), sprintf(), strlen(), snprintf, strlcat(),
@@ -267,7 +272,7 @@ Tests
 These are the test programs that are built if dbus is compiled using
 --enable-tests.
 
-dbus/dbus-test
+dbus/test-dbus
 This is the main unit test program that tests all aspects of the D-Bus
 client library.
 

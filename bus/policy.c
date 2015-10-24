@@ -2,6 +2,7 @@
 /* policy.c  Bus security policy
  *
  * Copyright (C) 2003, 2004  Red Hat, Inc.
+ * Copyright (C) 2014, 2015  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  * 
@@ -22,6 +23,8 @@
  */
 
 #include <config.h>
+#include <unistd.h>
+#include <sys/types.h>
 #include "policy.h"
 #include "services.h"
 #include "test.h"
@@ -133,7 +136,7 @@ struct BusPolicy
   DBusHashTable *rules_by_gid;     /**< per-GID policy rules */
   DBusList *at_console_true_rules; /**< console user policy rules where at_console="true"*/
   DBusList *at_console_false_rules; /**< console user policy rules where at_console="false"*/
-  DBusHashTable *rules_by_smack_label; /**< per-Smack label policy rules or NULL if disabled*/
+  DBusHashTable *rules_by_smack_label;  /**< per-Smack label policy rules or NULL if disabled*/
 };
 
 static void
@@ -184,14 +187,11 @@ bus_policy_new (void)
     goto failed;
 
 #ifdef DBUS_ENABLE_SMACK
-  if (have_smack())
-    {
-      policy->rules_by_smack_label = _dbus_hash_table_new (DBUS_HASH_STRING,
-                                                           (DBusFreeFunction) dbus_free,
-                                                           free_rule_list_func);
-      if (policy->rules_by_smack_label == NULL)
-        goto failed;
-    }
+  policy->rules_by_smack_label = _dbus_hash_table_new (DBUS_HASH_STRING,
+                                                       (DBusFreeFunction) dbus_free,
+                                                       free_rule_list_func);
+  if (policy->rules_by_smack_label == NULL)
+    goto failed;
 #endif
 
   return policy;
@@ -243,7 +243,6 @@ bus_policy_unref (BusPolicy *policy)
           _dbus_hash_table_unref (policy->rules_by_gid);
           policy->rules_by_gid = NULL;
         }
-
       if (policy->rules_by_smack_label)
         {
           _dbus_hash_table_unref (policy->rules_by_smack_label);
@@ -286,18 +285,24 @@ add_list_to_client (DBusList        **list,
   return TRUE;
 }
 
+/*
+ * for libdbuspolicy connection is always NULL
+ */
 BusClientPolicy*
-bus_policy_create_client_policy (BusPolicy      *policy,
-                                 DBusConnection *connection,
-                                 DBusError      *error)
+bus_policy_create_custom_client_policy  (BusPolicy        *policy,
+                                         DBusConnection   *connection,
+                                         dbus_pid_t       pid,
+                                         dbus_uid_t       uid,
+                                         DBusError        *error)
 {
   BusClientPolicy *client;
-  dbus_uid_t uid;
   dbus_bool_t at_console;
 
-  _dbus_assert (dbus_connection_get_is_authenticated (connection));
+  if (connection != NULL)
+    _dbus_assert (dbus_connection_get_is_authenticated (connection));
+
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
-  
+
   client = bus_client_policy_new ();
   if (client == NULL)
     goto nomem;
@@ -314,18 +319,27 @@ bus_policy_create_client_policy (BusPolicy      *policy,
       unsigned long *groups;
       int n_groups;
       int i;
-      
-      if (!bus_connection_get_unix_groups (connection, &groups, &n_groups, error))
-        goto failed;
-      
+
+      if (connection != NULL)
+        {
+          if (!bus_connection_get_unix_groups (connection, &groups, &n_groups, error))
+            goto failed;
+        }
+      else
+        {
+          /* only for libdbuspolicy purposes */
+          if (!bus_get_unix_groups (uid, &groups, &n_groups, error))
+            goto failed;
+        }
+
       i = 0;
       while (i < n_groups)
         {
           DBusList **list;
-          
+
           list = _dbus_hash_table_lookup_uintptr (policy->rules_by_gid,
                                                 groups[i]);
-          
+
           if (list != NULL)
             {
               if (!add_list_to_client (list, client))
@@ -334,45 +348,45 @@ bus_policy_create_client_policy (BusPolicy      *policy,
                   goto nomem;
                 }
             }
-          
+
           ++i;
         }
 
       dbus_free (groups);
     }
-  
-  if (dbus_connection_get_unix_user (connection, &uid))
-    {
-      if (_dbus_hash_table_get_n_entries (policy->rules_by_uid) > 0)
-        {
-          DBusList **list;
-          
-          list = _dbus_hash_table_lookup_uintptr (policy->rules_by_uid,
-                                                uid);
-          
-          if (list != NULL)
-            {
-              if (!add_list_to_client (list, client))
-                goto nomem;
-            }
-        }
 
-      /* Add console rules */
-      at_console = _dbus_unix_user_is_at_console (uid, error);
-      
-      if (at_console)
+  if (connection != NULL)
+    dbus_connection_get_unix_user (connection, &uid);
+
+  if (_dbus_hash_table_get_n_entries (policy->rules_by_uid) > 0)
+    {
+      DBusList **list;
+
+      list = _dbus_hash_table_lookup_uintptr (policy->rules_by_uid,
+                                              uid);
+
+      if (list != NULL)
         {
-          if (!add_list_to_client (&policy->at_console_true_rules, client))
+          if (!add_list_to_client (list, client))
             goto nomem;
         }
-      else if (dbus_error_is_set (error) == TRUE)
-        {
-          goto failed;
-        }
-      else if (!add_list_to_client (&policy->at_console_false_rules, client))
-        {
-          goto nomem;
-        }
+   }
+
+  /* Add console rules */
+  at_console = _dbus_unix_user_is_at_console (uid, error);
+
+  if (at_console)
+    {
+      if (!add_list_to_client (&policy->at_console_true_rules, client))
+        goto nomem;
+    }
+  else if (dbus_error_is_set (error) == TRUE)
+    {
+      goto failed;
+    }
+  else if (!add_list_to_client (&policy->at_console_false_rules, client))
+    {
+      goto nomem;
     }
 
   if (policy->rules_by_smack_label &&
@@ -381,13 +395,14 @@ bus_policy_create_client_policy (BusPolicy      *policy,
       DBusList *list = NULL;
       dbus_bool_t nomem_err = FALSE;
 
-      if (!bus_smack_generate_allowed_list (connection, policy->rules_by_smack_label, &list))
+      if (!bus_smack_generate_allowed_list (connection, policy->rules_by_smack_label, pid, &list))
         goto nomem;
 
       if (list != NULL)
         {
           nomem_err = !add_list_to_client (list, client);
           _dbus_list_clear (&list);
+          dbus_free(list);
         }
 
       if (nomem_err)
@@ -399,7 +414,7 @@ bus_policy_create_client_policy (BusPolicy      *policy,
     goto nomem;
 
   bus_client_policy_optimize (client);
-  
+
   return client;
 
  nomem:
@@ -409,6 +424,17 @@ bus_policy_create_client_policy (BusPolicy      *policy,
   if (client)
     bus_client_policy_unref (client);
   return NULL;
+}
+
+/*
+ * for libdbuspolicy connection is always NULL
+ */
+BusClientPolicy*
+bus_policy_create_client_policy (BusPolicy      *policy,
+                                 DBusConnection *connection,
+                                 DBusError      *error)
+{
+  return bus_policy_create_custom_client_policy  (policy, connection, getpid(), getuid(), error);
 }
 
 static dbus_bool_t
@@ -682,8 +708,6 @@ bus_policy_append_smack_rule (BusPolicy      *policy,
                               const char     *label,
                               BusPolicyRule  *rule)
 {
-  if (!have_smack())
-    return TRUE;
 #ifdef DBUS_ENABLE_SMACK
   DBusList **list;
 
@@ -809,12 +833,10 @@ bus_policy_merge (BusPolicy *policy,
                       to_absorb->rules_by_gid))
     return FALSE;
 
-#ifdef DBUS_ENABLE_SMACK
   if (have_smack() &&
       !merge_string_hash (policy->rules_by_smack_label,
                           to_absorb->rules_by_smack_label))
     return FALSE;
-#endif
 
   return TRUE;
 }
@@ -993,6 +1015,63 @@ bus_client_policy_append_rule (BusClientPolicy *policy,
   return TRUE;
 }
 
+/*
+ * bus_client_policy_print(): function only for debu libdbuspolicy purpose
+ *
+ * Import from: https://bugs.freedesktop.org/show_bug.cgi?id=39463
+ * Author: Chengwei Yang
+ */
+void
+bus_client_policy_print (BusClientPolicy *policy)
+{
+  DBusList *link;
+  BusPolicyRule *rule;
+  int counter = 0;
+
+  _dbus_assert (policy != NULL);
+
+  for (link = _dbus_list_get_first_link (&policy->rules);
+       link != NULL;
+       link = _dbus_list_get_next_link (&policy->rules, link))
+    {
+      rule = link->data;
+      counter++;
+      switch (rule->type)
+        {
+          case BUS_POLICY_RULE_SEND:
+            _dbus_warn ("%d send rule (%s): dest(%s) path(%s) interface(%s) member(%s)\n",counter,
+                        rule->allow ? "allow" : "deny",
+                        rule->d.send.destination, rule->d.send.path,
+                        rule->d.send.interface, rule->d.send.member);
+            break;
+          case BUS_POLICY_RULE_RECEIVE:
+            _dbus_warn ("%d receive rule (%s): from(%s) path(%s) interface(%s) member(%s)\n",counter,
+                        rule->allow ? "allow" : "deny",
+                        rule->d.receive.origin, rule->d.receive.path,
+                        rule->d.receive.interface, rule->d.receive.member);
+            break;
+          case BUS_POLICY_RULE_OWN:
+            _dbus_warn ("%d own rule (%s): service(%s)\n",counter,
+                        rule->allow ? "allow" : "deny",
+                        rule->d.own.service_name);
+            break;
+          case BUS_POLICY_RULE_GROUP:
+            _dbus_warn ("%d group rule (%s): gid(%d)\n",counter,
+                        rule->allow ? "allow" : "deny",
+                        (int) rule->d.group.gid);
+            break;
+          case BUS_POLICY_RULE_USER:
+            _dbus_warn ("%d user rule (%s): uid(%d)\n",counter,
+                        rule->allow ? "allow" : "deny",
+                        (int) rule->d.user.uid);
+            break;
+          default:
+            _dbus_warn ("invalid policy type\n");
+            break;
+        }
+    }
+}
+
 dbus_bool_t
 bus_client_policy_check_can_send (BusClientPolicy *policy,
                                   BusRegistry     *registry,
@@ -1164,6 +1243,153 @@ bus_client_policy_check_can_send (BusClientPolicy *policy,
       *log = rule->d.send.log;
       (*toggles)++;
 
+      _dbus_verbose ("  (policy) used rule, allow now = %d\n",
+                     allowed);
+    }
+
+  return allowed;
+}
+
+/*
+ * bus_policy_check_can_send():
+ * function only for libdbuspolicy purpose
+ *
+ */
+dbus_bool_t
+bus_policy_check_can_send (BusClientPolicy *policy,
+                           dbus_bool_t      requested_reply,
+                           int              msg_type,
+                           const char      *msg_destination,
+                           const char      *msg_path,
+                           const char      *msg_interface,
+                           const char      *msg_member,
+                           const char      *msg_error_name,
+                           int              msg_reply_serial)
+{
+  DBusList *link;
+  dbus_bool_t allowed;
+
+  _dbus_verbose ("  (policy) checking send rules\n");
+
+  allowed = FALSE;
+  link = _dbus_list_get_first_link (&policy->rules);
+  while (link != NULL)
+    {
+      BusPolicyRule *rule = link->data;
+
+      link = _dbus_list_get_next_link (&policy->rules, link);
+
+      /* Rule is skipped if it specifies a different
+       * message name from the message, or a different
+       * destination from the message
+       */
+
+      if (rule->type != BUS_POLICY_RULE_SEND)
+        {
+          _dbus_verbose ("  (policy) skipping non-send rule\n");
+          continue;
+        }
+
+      if (rule->d.send.message_type != DBUS_MESSAGE_TYPE_INVALID)
+        {
+          if (msg_type != rule->d.send.message_type)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different message type\n");
+              continue;
+            }
+        }
+
+      /* If it's a reply, the requested_reply flag kicks in */
+      if (msg_reply_serial != 0)
+        {
+          /* for allow, requested_reply=true means the rule applies
+           * only when reply was requested. requested_reply=false means
+           * always allow.
+           */
+          if (!requested_reply && rule->allow && rule->d.send.requested_reply && !rule->d.send.eavesdrop)
+            {
+              _dbus_verbose ("  (policy) skipping allow rule since it only applies to requested replies and does not allow eavesdropping\n");
+              continue;
+            }
+
+          /* for deny, requested_reply=false means the rule applies only
+           * when the reply was not requested. requested_reply=true means the
+           * rule always applies.
+           */
+          if (requested_reply && !rule->allow && !rule->d.send.requested_reply)
+            {
+              _dbus_verbose ("  (policy) skipping deny rule since it only applies to unrequested replies\n");
+              continue;
+            }
+        }
+
+      if (rule->d.send.path != NULL)
+        {
+          if (msg_path != NULL &&
+              strcmp (msg_path,
+                      rule->d.send.path) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different path\n");
+              continue;
+            }
+        }
+
+      if (rule->d.send.interface != NULL)
+        {
+          /* The interface is optional in messages. For allow rules, if the message
+           * has no interface we want to skip the rule (and thus not allow);
+           * for deny rules, if the message has no interface we want to use the
+           * rule (and thus deny).
+           */
+          dbus_bool_t no_interface;
+
+          no_interface = msg_interface == NULL;
+
+          if ((no_interface && rule->allow) ||
+              (!no_interface &&
+               strcmp (msg_interface,
+                       rule->d.send.interface) != 0))
+            {
+              _dbus_verbose ("  (policy) skipping rule for different interface\n");
+              continue;
+            }
+        }
+
+      if (rule->d.send.member != NULL)
+        {
+          if (msg_member != NULL &&
+              strcmp (msg_member,
+                      rule->d.send.member) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different member\n");
+              continue;
+            }
+        }
+
+      if (rule->d.send.error != NULL)
+        {
+          if (msg_error_name != NULL &&
+              strcmp (msg_error_name,
+                      rule->d.send.error) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different error name\n");
+              continue;
+            }
+        }
+
+      if (rule->d.send.destination != NULL)
+        {
+          if (msg_destination != NULL &&
+              strcmp (msg_destination,
+                      rule->d.send.destination) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule because message dest is not %s\n", rule->d.send.destination);
+              continue;
+            }
+        }
+
+      /* Use this rule */
+      allowed = rule->allow;
       _dbus_verbose ("  (policy) used rule, allow now = %d\n",
                      allowed);
     }
@@ -1371,7 +1597,173 @@ bus_client_policy_check_can_receive (BusClientPolicy *policy,
   return allowed;
 }
 
+/*
+ * bus_policy_check_can_receive():
+ * function only for libdbuspolicy purpose
+ *
+ */
+dbus_bool_t
+bus_policy_check_can_receive (BusClientPolicy *policy,
+                              dbus_bool_t      requested_reply,
+                              int              msg_type,
+                              const char      *msg_sender,
+                              const char      *msg_path,
+                              const char      *msg_interface,
+                              const char      *msg_member,
+                              const char      *msg_error_name,
+                              int              msg_reply_serial)
+{
+  DBusList *link;
+  dbus_bool_t allowed;
+  dbus_bool_t eavesdropping;
 
+  eavesdropping = FALSE;
+
+  /* policy->rules is in the order the rules appeared
+   * in the config file, i.e. last rule that applies wins
+   */
+
+  _dbus_verbose ("  (policy) checking receive rules\n");
+
+  allowed = FALSE;
+  link = _dbus_list_get_first_link (&policy->rules);
+  while (link != NULL)
+    {
+      BusPolicyRule *rule = link->data;
+
+      link = _dbus_list_get_next_link (&policy->rules, link);
+
+      if (rule->type != BUS_POLICY_RULE_RECEIVE)
+        {
+          _dbus_verbose ("  (policy) skipping non-receive rule\n");
+          continue;
+        }
+
+      if (rule->d.receive.message_type != DBUS_MESSAGE_TYPE_INVALID)
+        {
+          if (msg_type != rule->d.receive.message_type)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different message type\n");
+              continue;
+            }
+        }
+
+      /* for allow, eavesdrop=false means the rule doesn't apply when
+       * eavesdropping. eavesdrop=true means always allow.
+       */
+      if (eavesdropping && rule->allow && !rule->d.receive.eavesdrop)
+        {
+          _dbus_verbose ("  (policy) skipping allow rule since it doesn't apply to eavesdropping\n");
+          continue;
+        }
+
+      /* for deny, eavesdrop=true means the rule applies only when
+       * eavesdropping; eavesdrop=false means always deny.
+       */
+      if (!eavesdropping && !rule->allow && rule->d.receive.eavesdrop)
+        {
+          _dbus_verbose ("  (policy) skipping deny rule since it only applies to eavesdropping\n");
+          continue;
+        }
+
+      /* If it's a reply, the requested_reply flag kicks in */
+      if (msg_reply_serial != 0)
+        {
+          /* for allow, requested_reply=true means the rule applies
+           * only when reply was requested. requested_reply=false means
+           * always allow.
+           */
+          if (!requested_reply && rule->allow && rule->d.receive.requested_reply && !rule->d.receive.eavesdrop)
+            {
+              _dbus_verbose ("  (policy) skipping allow rule since it only applies to requested replies and does not allow eavesdropping\n");
+              continue;
+            }
+
+          /* for deny, requested_reply=false means the rule applies only
+           * when the reply was not requested. requested_reply=true means the
+           * rule always applies.
+           */
+          if (requested_reply && !rule->allow && !rule->d.receive.requested_reply)
+            {
+              _dbus_verbose ("  (policy) skipping deny rule since it only applies to unrequested replies\n");
+              continue;
+            }
+        }
+
+      if (rule->d.receive.path != NULL)
+        {
+          if (msg_path != NULL &&
+              strcmp (msg_path,
+                      rule->d.receive.path) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different path\n");
+              continue;
+            }
+        }
+
+      if (rule->d.receive.interface != NULL)
+        {
+          /* The interface is optional in messages. For allow rules, if the message
+           * has no interface we want to skip the rule (and thus not allow);
+           * for deny rules, if the message has no interface we want to use the
+           * rule (and thus deny).
+           */
+          dbus_bool_t no_interface;
+
+          no_interface = msg_interface == NULL;
+
+          if ((no_interface && rule->allow) ||
+              (!no_interface &&
+               strcmp (msg_interface,
+                       rule->d.receive.interface) != 0))
+            {
+              _dbus_verbose ("  (policy) skipping rule for different interface\n");
+              continue;
+            }
+        }
+
+      if (rule->d.receive.member != NULL)
+        {
+          if (msg_member != NULL &&
+              strcmp (msg_member,
+                      rule->d.receive.member) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different member\n");
+              continue;
+            }
+        }
+
+      if (rule->d.receive.error != NULL)
+        {
+          if (msg_error_name != NULL &&
+              strcmp (msg_error_name,
+                      rule->d.receive.error) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule for different error name\n");
+              continue;
+            }
+        }
+
+      if (rule->d.receive.origin != NULL)
+        {
+          if (msg_sender != NULL &&
+              strcmp (msg_sender,
+                      rule->d.receive.origin) != 0)
+            {
+              _dbus_verbose ("  (policy) skipping rule because message sender is not %s\n",
+                             rule->d.receive.origin);
+              continue;
+            }
+        }
+
+      /* Use this rule */
+      allowed = rule->allow;
+      _dbus_verbose ("  (policy) used rule, allow now = %d\n",
+                     allowed);
+    }
+
+  return allowed;
+}
 
 static dbus_bool_t
 bus_rules_check_can_own (DBusList *rules,
@@ -1433,12 +1825,12 @@ bus_client_policy_check_can_own (BusClientPolicy  *policy,
   return bus_rules_check_can_own (policy->rules, service_name);
 }
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 dbus_bool_t
 bus_policy_check_can_own (BusPolicy  *policy,
                           const DBusString *service_name)
 {
   return bus_rules_check_can_own (policy->default_rules, service_name);
 }
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */
 

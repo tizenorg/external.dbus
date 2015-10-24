@@ -43,8 +43,20 @@ void            bus_connections_foreach           (BusConnections               
 void            bus_connections_foreach_active    (BusConnections               *connections,
                                                    BusConnectionForeachFunction  function,
                                                    void                         *data);
+#ifdef ENABLE_KDBUS_TRANSPORT
+dbus_bool_t     bus_connections_add_activator     (BusConnections *connections,
+                                                   DBusConnection *connection,
+                                                   const char *name);
+void            bus_connections_clear_activators  (BusConnections *connections);
+DBusConnection* bus_connections_find_conn_by_name (BusConnections *connections,
+                                                   const char* name);
+DBusConnection* bus_connections_find_activator_by_name(BusConnections *connections,
+                                                      const char* name);
+#endif
 BusContext*     bus_connections_get_context       (BusConnections               *connections);
 void            bus_connections_increment_stamp   (BusConnections               *connections);
+dbus_bool_t     bus_connections_reload_policy     (BusConnections               *connections,
+                                                   DBusError                    *error);
 BusContext*     bus_connection_get_context        (DBusConnection               *connection);
 BusConnections* bus_connection_get_connections    (DBusConnection               *connection);
 BusRegistry*    bus_connection_get_registry       (DBusConnection               *connection);
@@ -52,7 +64,7 @@ BusActivation*  bus_connection_get_activation     (DBusConnection               
 BusMatchmaker*  bus_connection_get_matchmaker     (DBusConnection               *connection);
 const char *    bus_connection_get_loginfo        (DBusConnection        *connection);
 BusSELinuxID*   bus_connection_get_selinux_id     (DBusConnection               *connection);
-const char *    bus_connection_get_smack_label    (DBusConnection               *connection);
+const char*     bus_connection_get_smack_label    (DBusConnection               *connection);
 dbus_bool_t     bus_connections_check_limits      (BusConnections               *connections,
                                                    DBusConnection               *requesting_completion,
                                                    DBusError                    *error);
@@ -80,6 +92,10 @@ dbus_bool_t bus_connection_preallocate_oom_error (DBusConnection *connection);
 void        bus_connection_send_oom_error        (DBusConnection *connection,
                                                   DBusMessage    *in_reply_to);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusList** bus_connection_get_services_owned (DBusConnection *connection);
+#endif
+
 /* called by signals.c */
 dbus_bool_t bus_connection_add_match_rule      (DBusConnection *connection,
                                                 BusMatchRule   *rule);
@@ -89,6 +105,9 @@ void        bus_connection_remove_match_rule   (DBusConnection *connection,
                                                 BusMatchRule   *rule);
 int         bus_connection_get_n_match_rules   (DBusConnection *connection);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusList*   bus_connection_get_match_rules_list (DBusConnection *connection);
+#endif
 
 /* called by services.c */
 dbus_bool_t bus_connection_add_owned_service      (DBusConnection *connection,
@@ -115,6 +134,12 @@ dbus_bool_t      bus_connection_get_unix_groups  (DBusConnection       *connecti
                                                   DBusError            *error);
 BusClientPolicy* bus_connection_get_policy  (DBusConnection       *connection);
 
+dbus_bool_t bus_connection_is_monitor (DBusConnection  *connection);
+dbus_bool_t bus_connection_be_monitor (DBusConnection  *connection,
+                                       BusTransaction  *transaction,
+                                       DBusList       **rules,
+                                       DBusError       *error);
+
 /* transaction API so we can send or not send a block of messages as a whole */
 
 typedef void (* BusTransactionCancelFunction) (void *data);
@@ -125,6 +150,12 @@ BusConnections* bus_transaction_get_connections  (BusTransaction               *
 dbus_bool_t     bus_transaction_send             (BusTransaction               *transaction,
                                                   DBusConnection               *connection,
                                                   DBusMessage                  *message);
+dbus_bool_t     bus_transaction_capture          (BusTransaction               *transaction,
+                                                  DBusConnection               *connection,
+                                                  DBusMessage                  *message);
+dbus_bool_t     bus_transaction_capture_error_reply (BusTransaction            *transaction,
+                                                  const DBusError              *error,
+                                                  DBusMessage                  *in_reply_to);
 dbus_bool_t     bus_transaction_send_from_driver (BusTransaction               *transaction,
                                                   DBusConnection               *connection,
                                                   DBusMessage                  *message);
@@ -139,9 +170,16 @@ dbus_bool_t     bus_transaction_add_cancel_hook  (BusTransaction               *
                                                   void                         *data,
                                                   DBusFreeFunction              free_data_function);
 
-/* called by stats.c, only present if DBUS_ENABLE_STATS */
+/* for libdbuspolicy purposes */
+dbus_bool_t     bus_get_unix_groups              (unsigned long                 uid,
+                                                  unsigned long               **groups,
+                                                  int                          *n_groups,
+                                                  DBusError                    *error);
+
 int bus_connections_get_n_active                  (BusConnections *connections);
 int bus_connections_get_n_incomplete              (BusConnections *connections);
+
+/* called by stats.c, only present if DBUS_ENABLE_STATS */
 int bus_connections_get_total_match_rules         (BusConnections *connections);
 int bus_connections_get_peak_match_rules          (BusConnections *connections);
 int bus_connections_get_peak_match_rules_per_conn (BusConnections *connections);

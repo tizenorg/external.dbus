@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2003  CodeFactory AB
  * Copyright (C) 2003  Red Hat, Inc.
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  * 
@@ -28,9 +29,16 @@
 #include "dbus-internals.h"
 #include "dbus-message.h"
 #include "dbus-marshal-validate.h"
+#include "dbus-misc.h"
 #include "dbus-threads-internal.h"
 #include "dbus-connection-internal.h"
 #include "dbus-string.h"
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "dbus-transport-kdbus.h"
+#include <stdlib.h>
+#include <limits.h>
+#include <stdio.h>
+#endif
 
 /**
  * @defgroup DBusBus Message bus APIs
@@ -95,19 +103,6 @@ static DBusBusType activation_bus_type = DBUS_BUS_STARTER;
 
 static dbus_bool_t initialized = FALSE;
 
-/**
- * Lock for globals in this file
- */
-_DBUS_DEFINE_GLOBAL_LOCK (bus);
-
-/**
- * Global lock covering all BusData on any connection. The bet is
- * that some lock contention is better than more memory
- * for a per-connection lock, but it's tough to imagine it mattering
- * either way.
- */
-_DBUS_DEFINE_GLOBAL_LOCK (bus_datas);
-
 static void
 addresses_shutdown_func (void *data)
 {
@@ -147,6 +142,15 @@ get_from_env (char           **connection_p,
     }
 }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+void dbus_bus_set_bus_connection_address(DBusBusType address_type, char* address)
+{
+	if(bus_connection_addresses[address_type] != NULL)
+		free(bus_connection_addresses[address_type]);
+	bus_connection_addresses[address_type] = address;
+}
+#endif
+
 static dbus_bool_t
 init_session_address (void)
 {
@@ -156,8 +160,10 @@ init_session_address (void)
 
   /* First, look in the environment.  This is the normal case on 
    * freedesktop.org/Unix systems. */
+#ifndef PROFILE_TV
   get_from_env (&bus_connection_addresses[DBUS_BUS_SESSION],
                      "DBUS_SESSION_BUS_ADDRESS");
+#endif
   if (bus_connection_addresses[DBUS_BUS_SESSION] == NULL)
     {
       dbus_bool_t supported;
@@ -192,12 +198,12 @@ init_session_address (void)
   if (!retval)
     return FALSE;
 
-  /* The DBUS_SESSION_BUS_DEFAULT_ADDRESS should have really been named
-   * DBUS_SESSION_BUS_FALLBACK_ADDRESS. 
-   */
+  /* We have a hard-coded (but compile-time-configurable) fallback address for
+   * the session bus. */
   if (bus_connection_addresses[DBUS_BUS_SESSION] == NULL)
     bus_connection_addresses[DBUS_BUS_SESSION] =
-      _dbus_strdup (DBUS_SESSION_BUS_DEFAULT_ADDRESS);
+      _dbus_strdup (DBUS_SESSION_BUS_CONNECT_ADDRESS);
+
   if (bus_connection_addresses[DBUS_BUS_SESSION] == NULL)
     return FALSE;
 
@@ -229,10 +235,11 @@ init_connections_unlocked (void)
        if (bus_connection_addresses[DBUS_BUS_SYSTEM] == NULL)
          {
            _dbus_verbose ("Filling in system bus address...\n");
-           
+#ifndef PROFILE_TV
            if (!get_from_env (&bus_connection_addresses[DBUS_BUS_SYSTEM],
                               "DBUS_SYSTEM_BUS_ADDRESS"))
              return FALSE;
+#endif
          }
 
                   
@@ -306,12 +313,6 @@ init_connections_unlocked (void)
        * the above code will work right
        */
       
-      if (!_dbus_setenv ("DBUS_ACTIVATION_ADDRESS", NULL))
-        return FALSE;
-
-      if (!_dbus_setenv ("DBUS_ACTIVATION_BUS_TYPE", NULL))
-        return FALSE;
-      
       if (!_dbus_register_shutdown_func (addresses_shutdown_func,
                                          NULL))
         return FALSE;
@@ -330,7 +331,11 @@ bus_data_free (void *data)
   if (bd->is_well_known)
     {
       int i;
-      _DBUS_LOCK (bus);
+
+      if (!_DBUS_LOCK (bus))
+        _dbus_assert_not_reached ("global locks should have been initialized "
+            "when we attached bus data");
+
       /* We may be stored in more than one slot */
       /* This should now be impossible - these slots are supposed to
        * be cleared on disconnect, so should not need to be cleared on
@@ -401,8 +406,13 @@ void
 _dbus_bus_notify_shared_connection_disconnected_unlocked (DBusConnection *connection)
 {
   int i;
-  
-  _DBUS_LOCK (bus);
+
+  if (!_DBUS_LOCK (bus))
+    {
+      /* If it was in bus_connections, we would have initialized global locks
+       * when we added it. So, it can't be. */
+      return;
+    }
 
   /* We are expecting to have the connection saved in only one of these
    * slots, but someone could in a pathological case set system and session
@@ -436,7 +446,12 @@ internal_bus_get (DBusBusType  type,
 
   connection = NULL;
 
-  _DBUS_LOCK (bus);
+  if (!_DBUS_LOCK (bus))
+    {
+      _DBUS_SET_OOM (error);
+      /* do not "goto out", that would try to unlock */
+      return NULL;
+    }
 
   if (!init_connections_unlocked ())
     {
@@ -506,8 +521,10 @@ internal_bus_get (DBusBusType  type,
    */
   dbus_connection_set_exit_on_disconnect (connection,
                                           TRUE);
- 
-  _DBUS_LOCK (bus_datas);
+
+  if (!_DBUS_LOCK (bus_datas))
+    _dbus_assert_not_reached ("global locks were initialized already");
+
   bd = ensure_bus_data (connection);
   _dbus_assert (bd != NULL); /* it should have been created on
                                 register, so OOM not possible */
@@ -523,6 +540,67 @@ out:
   return connection;
 }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+
+DBusConnection *
+daemon_bus_get (const char *address,
+                  DBusError   *error)
+{
+  DBusConnection *connection;
+  BusData *bd;
+
+  _dbus_assert (address != NULL);
+  _dbus_return_val_if_error_is_set (error, NULL);
+
+  connection = NULL;
+
+  if (!_DBUS_LOCK (bus))
+    {
+      _DBUS_SET_OOM (error);
+      /* do not "goto out", that would try to unlock */
+      return NULL;
+    }
+
+  connection = dbus_connection_open_private (address, error);
+  if (!connection)
+    {
+      goto out;
+    }
+
+  dbus_connection_clear_disconnect_message(connection);
+
+  if (!dbus_bus_register (connection, error))
+    {
+      _dbus_connection_close_possibly_shared (connection);
+      dbus_connection_unref (connection);
+      connection = NULL;
+      goto out;
+    }
+
+  /* By default we're bound to the lifecycle of
+   * the message bus.
+   */
+  dbus_connection_set_exit_on_disconnect (connection,
+                                          TRUE);
+
+  if (!_DBUS_LOCK (bus_datas))
+    _dbus_assert_not_reached ("global locks were initialized already");
+
+  bd = ensure_bus_data (connection);
+  _dbus_assert (bd != NULL); /* it should have been created on
+                                register, so OOM not possible */
+  bd->is_well_known = TRUE;
+  _DBUS_UNLOCK (bus_datas);
+
+out:
+  /* Return a reference to the caller, or NULL with error set. */
+  if (connection == NULL)
+    _DBUS_ASSERT_ERROR_IS_SET (error);
+
+  _DBUS_UNLOCK (bus);
+  return connection;
+}
+#endif
 
 /** @} */ /* end of implementation details docs */
 
@@ -554,7 +632,7 @@ out:
  * 
  * @param type bus type
  * @param error address where an error can be returned.
- * @returns a #DBusConnection with new ref
+ * @returns a #DBusConnection with new ref or #NULL on error
  */
 DBusConnection *
 dbus_bus_get (DBusBusType  type,
@@ -649,7 +727,7 @@ dbus_bus_register (DBusConnection *connection,
                    DBusError      *error)
 {
   DBusMessage *message, *reply;
-  char *name;
+  char *name = NULL;
   BusData *bd;
   dbus_bool_t retval;
 
@@ -660,7 +738,12 @@ dbus_bus_register (DBusConnection *connection,
   message = NULL;
   reply = NULL;
 
-  _DBUS_LOCK (bus_datas);
+  if (!_DBUS_LOCK (bus_datas))
+    {
+      _DBUS_SET_OOM (error);
+      /* do not "goto out", that would try to unlock */
+      return FALSE;
+    }
 
   bd = ensure_bus_data (connection);
   if (bd == NULL)
@@ -689,6 +772,20 @@ dbus_bus_register (DBusConnection *connection,
       goto out;
     }
   
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(dbus_connection_is_kdbus(connection))
+    {
+      DBusMessageIter args;
+      dbus_uint32_t registration_flags = 0;
+
+      if (dbus_connection_is_monitor(connection))
+          registration_flags |= REGISTER_FLAG_MONITOR;
+
+      dbus_message_iter_init_append(message, &args);
+      dbus_message_iter_append_basic(&args, DBUS_TYPE_UINT32, &registration_flags);
+    }
+#endif
+
   reply = dbus_connection_send_with_reply_and_block (connection, message, -1, error);
 
   if (reply == NULL)
@@ -769,8 +866,12 @@ dbus_bus_set_unique_name (DBusConnection *connection,
   _dbus_return_val_if_fail (connection != NULL, FALSE);
   _dbus_return_val_if_fail (unique_name != NULL, FALSE);
 
-  _DBUS_LOCK (bus_datas);
-  
+  if (!_DBUS_LOCK (bus_datas))
+    {
+      /* do not "goto out", that would try to unlock */
+      return FALSE;
+    }
+
   bd = ensure_bus_data (connection);
   if (bd == NULL)
     goto out;
@@ -812,8 +913,13 @@ dbus_bus_get_unique_name (DBusConnection *connection)
 
   _dbus_return_val_if_fail (connection != NULL, NULL);
 
-  _DBUS_LOCK (bus_datas);
-  
+  if (!_DBUS_LOCK (bus_datas))
+    {
+      /* We'd have initialized locks when we gave it its unique name, if it
+       * had one. Don't "goto out", that would try to unlock. */
+      return NULL;
+    }
+
   bd = ensure_bus_data (connection);
   if (bd == NULL)
     goto out;

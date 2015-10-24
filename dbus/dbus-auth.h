@@ -2,6 +2,7 @@
 /* dbus-auth.h Authentication
  *
  * Copyright (C) 2002  Red Hat Inc.
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  * 
@@ -43,6 +44,9 @@ typedef enum
 
 DBusAuth*     _dbus_auth_server_new          (const DBusString       *guid);
 DBusAuth*     _dbus_auth_client_new          (void);
+#ifdef ENABLE_KDBUS_TRANSPORT
+DBusAuth* 	  _dbus_auth_client_new_kdbus 	 (void);
+#endif
 DBusAuth*     _dbus_auth_ref                 (DBusAuth               *auth);
 void          _dbus_auth_unref               (DBusAuth               *auth);
 dbus_bool_t   _dbus_auth_set_mechanisms      (DBusAuth               *auth,
@@ -55,8 +59,7 @@ void          _dbus_auth_bytes_sent          (DBusAuth               *auth,
 void          _dbus_auth_get_buffer          (DBusAuth               *auth,
                                               DBusString            **buffer);
 void          _dbus_auth_return_buffer       (DBusAuth               *auth,
-                                              DBusString             *buffer,
-                                              int                     bytes_read);
+                                              DBusString             *buffer);
 void          _dbus_auth_get_unused_bytes    (DBusAuth               *auth,
                                               const DBusString      **str);
 void          _dbus_auth_delete_unused_bytes (DBusAuth               *auth);

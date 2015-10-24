@@ -1,4 +1,4 @@
-project(tools)
+add_definitions("-DDBUS_COMPILATION")
 
 set (dbus_send_SOURCES
 	../../tools/dbus-print-message.c			
@@ -10,6 +10,8 @@ set (dbus_monitor_SOURCES
 	../../tools/dbus-monitor.c				
 	../../tools/dbus-print-message.c			
 	../../tools/dbus-print-message.h
+	../../tools/tool-common.c
+	../../tools/tool-common.h
 )
 
 if (WIN32)

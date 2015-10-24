@@ -1,7 +1,7 @@
 /* dbus-asv-util.c - utility functions for a{sv}
  *
  * Copyright © 2011-2012 Nokia Corporation
- * Copyright © 2012 Collabora Ltd.
+ * Copyright © 2012-2013 Collabora Ltd.
  *
  * Licensed under the Academic Free License version 2.1
  *
@@ -64,7 +64,7 @@ _dbus_asv_new_method_return (DBusMessage      *message,
   return reply;
 }
 
-/**
+/*
  * Open a new entry in an a{sv} (map from string to variant).
  *
  * This must be paired with a call to either _dbus_asv_close_entry()
@@ -80,7 +80,7 @@ _dbus_asv_new_method_return (DBusMessage      *message,
  * @param var_iter will be initialized to append (i.e. write) to the variant
  * @returns #TRUE on success, or #FALSE if not enough memory
  */
-dbus_bool_t
+static dbus_bool_t
 _dbus_asv_open_entry (DBusMessageIter *arr_iter,
                       DBusMessageIter *entry_iter,
                       const char      *key,
@@ -107,7 +107,7 @@ _dbus_asv_open_entry (DBusMessageIter *arr_iter,
   return TRUE;
 }
 
-/**
+/*
  * Closes an a{sv} entry after successfully appending the value.
  *
  * If this function fails, the a{sv} must be abandoned, for instance
@@ -118,7 +118,7 @@ _dbus_asv_open_entry (DBusMessageIter *arr_iter,
  * @param var_iter the iterator appending to the variant, will be closed
  * @returns #TRUE on success, or #FALSE if not enough memory
  */
-dbus_bool_t
+static dbus_bool_t
 _dbus_asv_close_entry (DBusMessageIter *arr_iter,
                        DBusMessageIter *entry_iter,
                        DBusMessageIter *var_iter)
@@ -152,7 +152,7 @@ _dbus_asv_close (DBusMessageIter *iter,
   return dbus_message_iter_close_container (iter, arr_iter);
 }
 
-/**
+/*
  * Closes an a{sv} entry after unsuccessfully appending a value.
  * You must also abandon the a{sv} itself (for instance with
  * _dbus_asv_abandon()), and abandon whatever larger data structure
@@ -162,7 +162,7 @@ _dbus_asv_close (DBusMessageIter *iter,
  * @param arr_iter the iterator appending to the array, will be closed
  * @returns #TRUE on success, or #FALSE if not enough memory
  */
-void
+static void
 _dbus_asv_abandon_entry (DBusMessageIter *arr_iter,
                          DBusMessageIter *entry_iter,
                          DBusMessageIter *var_iter)

@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2003 CodeFactory AB
  * Copyright (C) 2003, 2004, 2005 Red Hat, Inc.
+ * Copyright (C) 2013  Samsung Electronics
  *
  * Licensed under the Academic Free License version 2.1
  *
@@ -29,8 +30,8 @@
 #include "dispatch.h"
 #include "services.h"
 #include "selinux.h"
-#include "signals.h"
 #include "smack.h"
+#include "signals.h"
 #include "stats.h"
 #include "utils.h"
 
@@ -40,6 +41,14 @@
 #include <dbus/dbus-message.h>
 #include <dbus/dbus-marshal-recursive.h>
 #include <string.h>
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+#include "kdbus-d.h"
+#include <stdio.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+#endif
 
 static DBusConnection *
 bus_driver_get_conn_helper (DBusConnection  *connection,
@@ -83,6 +92,107 @@ bus_driver_get_conn_helper (DBusConnection  *connection,
   return conn;
 }
 
+/*
+ * Log a security warning and set error unless the uid of the connection
+ * is either the uid of this process, or on Unix, uid 0 (root).
+ *
+ * This is intended to be a second line of defence after <deny> rules,
+ * to mitigate incorrect system bus security policy configuration files
+ * like the ones in CVE-2014-8148 and CVE-2014-8156, and (if present)
+ * LSM rules; so it doesn't need to be perfect, but as long as we have
+ * potentially dangerous functionality in the system bus, it does need
+ * to exist.
+ */
+static dbus_bool_t
+bus_driver_check_caller_is_privileged (DBusConnection *connection,
+                                       BusTransaction *transaction,
+                                       DBusMessage    *message,
+                                       DBusError      *error)
+{
+#ifdef DBUS_UNIX
+  unsigned long uid;
+
+  if (!dbus_connection_get_unix_user (connection, &uid))
+    {
+      const char *method = dbus_message_get_member (message);
+
+      /* Yes this repetition is pretty horrible, but there's no
+       * bus_context_log_valist() or dbus_set_error_valist() or
+       * bus_context_log_literal() or dbus_set_error_literal().
+       */
+      bus_context_log (bus_transaction_get_context (transaction),
+          DBUS_SYSTEM_LOG_SECURITY,
+          "rejected attempt to call %s by unknown uid", method);
+      dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED,
+          "rejected attempt to call %s by unknown uid", method);
+      return FALSE;
+    }
+
+  /* I'm writing it in this slightly strange form so that it's more
+   * obvious that this security-sensitive code is correct.
+   */
+  if (_dbus_unix_user_is_process_owner (uid))
+    {
+      /* OK */
+    }
+  else if (uid == 0)
+    {
+      /* OK */
+    }
+  else
+    {
+      const char *method = dbus_message_get_member (message);
+
+      bus_context_log (bus_transaction_get_context (transaction),
+          DBUS_SYSTEM_LOG_SECURITY,
+          "rejected attempt to call %s by uid %lu", method, uid);
+      dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED,
+          "rejected attempt to call %s by uid %lu", method, uid);
+      return FALSE;
+    }
+
+  return TRUE;
+#elif DBUS_WIN
+  char *windows_sid = NULL;
+  dbus_bool_t ret = FALSE;
+
+  if (!dbus_connection_get_windows_user (connection, &windows_sid))
+    {
+      const char *method = dbus_message_get_member (message);
+
+      bus_context_log (bus_transaction_get_context (transaction),
+          DBUS_SYSTEM_LOG_SECURITY,
+          "rejected attempt to call %s by unknown uid", method);
+      dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED,
+          "rejected attempt to call %s by unknown uid", method);
+      goto out;
+    }
+
+  if (!_dbus_windows_user_is_process_owner (windows_sid))
+    {
+      const char *method = dbus_message_get_member (message);
+
+      bus_context_log (bus_transaction_get_context (transaction),
+          DBUS_SYSTEM_LOG_SECURITY,
+          "rejected attempt to call %s by uid %s", method, windows_sid);
+      dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED,
+          "rejected attempt to call %s by uid %s", method, windows_sid);
+      goto out;
+    }
+
+  ret = TRUE;
+out:
+  dbus_free (windows_sid);
+  return ret;
+#else
+  /* make sure we fail closed in the hypothetical case that we are neither
+   * Unix nor Windows */
+  dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED,
+      "please teach bus/driver.c how uids work on this platform");
+  return FALSE;
+#endif
+}
+
 static dbus_bool_t bus_driver_send_welcome_message (DBusConnection *connection,
                                                     DBusMessage    *hello_message,
                                                     BusTransaction *transaction,
@@ -98,6 +208,11 @@ bus_driver_send_service_owner_changed (const char     *service_name,
   DBusMessage *message;
   dbus_bool_t retval;
   const char *null_service;
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    return TRUE;
+#endif
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
@@ -129,6 +244,9 @@ bus_driver_send_service_owner_changed (const char     *service_name,
 
   _dbus_assert (dbus_message_has_signature (message, "sss"));
 
+  if (!bus_transaction_capture (transaction, NULL, message))
+    goto oom;
+
   retval = bus_dispatch_matches (transaction, NULL, NULL, message, error);
   dbus_message_unref (message);
 
@@ -147,6 +265,11 @@ bus_driver_send_service_lost (DBusConnection *connection,
                               DBusError      *error)
 {
   DBusMessage *message;
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    return TRUE;
+#endif
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
@@ -190,6 +313,11 @@ bus_driver_send_service_acquired (DBusConnection *connection,
                                   DBusError      *error)
 {
   DBusMessage *message;
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    return TRUE;
+#endif
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
@@ -300,6 +428,15 @@ bus_driver_handle_hello (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      if (!bus_driver_send_welcome_message (connection, message, transaction, error))
+        return FALSE;
+      return TRUE;
+    }
+#endif
+
   if (bus_connection_is_active (connection))
     {
       /* We already handled an Hello message for this connection. */
@@ -379,6 +516,15 @@ bus_driver_send_welcome_message (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      name = dbus_message_get_sender(hello_message);
+      if (name == NULL)  //this is for not properly kdbus adopted libraries that sends hello to daemon and do not set sender field
+          name = "";  //todo what to do than has to be decided and tested - whether send dummy data or error reply
+    }
+  else
+#endif
   name = bus_connection_get_name (connection);
   _dbus_assert (name != NULL);
 
@@ -438,12 +584,26 @@ bus_driver_handle_list_services (DBusConnection *connection,
       return FALSE;
     }
 
-  if (!bus_registry_list_services (registry, &services, &len))
-    {
-      dbus_message_unref (reply);
-      BUS_SET_OOM (error);
-      return FALSE;
-    }
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+  {
+    if(!kdbus_list_services (dbus_connection_get_transport(connection), &services, &len))
+      {
+        dbus_message_unref (reply);
+        BUS_SET_OOM (error); // TODO kdbus_list_services returns false but it doesn't have to be OOM
+        return FALSE;
+      }
+  }
+  else
+#endif
+  {
+      if (!bus_registry_list_services (registry, &services, &len))
+        {
+          dbus_message_unref (reply);
+          BUS_SET_OOM (error);
+          return FALSE;
+        }
+  }
 
   dbus_message_iter_init_append (reply, &iter);
 
@@ -457,6 +617,9 @@ bus_driver_handle_list_services (DBusConnection *connection,
       return FALSE;
     }
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(!bus_context_is_kdbus(bus_transaction_get_context (transaction))) //not needed for kdbus, we got it from kdbus_list_services
+#endif
   {
     /* Include the bus driver in the list */
     const char *v_STRING = DBUS_SERVICE_DBUS;
@@ -628,13 +791,25 @@ bus_driver_handle_acquire_service (DBusConnection *connection,
   retval = FALSE;
   reply = NULL;
 
-  _dbus_string_init_const (&service_name, name);
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      _dbus_verbose("Unsupported RequestName method called by %s\n", dbus_message_get_sender(message));
+      dbus_set_error(error, DBUS_ERROR_NOT_SUPPORTED, "RequestName method must be implemented in lib when on kdbus.");
+      goto out;
+    }
+  else
+#endif
+  {
 
-  if (!bus_registry_acquire_service (registry, connection,
-                                     &service_name, flags,
-                                     &service_reply, transaction,
-                                     error))
-    goto out;
+    _dbus_string_init_const (&service_name, name);
+
+    if (!bus_registry_acquire_service (registry, connection,
+                                       &service_name, flags,
+                                       &service_reply, transaction,
+                                       error))
+      goto out;
+  }
 
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
@@ -692,6 +867,15 @@ bus_driver_handle_release_service (DBusConnection *connection,
 
   _dbus_string_init_const (&service_name, name);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      _dbus_verbose("Unsupported ReleaseName method called by %s\n", dbus_message_get_sender(message));
+      dbus_set_error(error, DBUS_ERROR_NOT_SUPPORTED, "ReleaseName method must be implemented in lib when on kdbus.");
+      goto out;
+    }
+  else
+#endif
   if (!bus_registry_release_service (registry, connection,
                                      &service_name, &service_reply,
                                      transaction, error))
@@ -755,9 +939,30 @@ bus_driver_handle_service_exists (DBusConnection *connection,
     }
   else
     {
-      _dbus_string_init_const (&service_name, name);
-      service = bus_registry_lookup (registry, &service_name);
-      service_exists = service != NULL;
+#ifdef ENABLE_KDBUS_TRANSPORT
+      if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+        {
+          int inter_ret;
+          struct nameInfo info;
+
+          inter_ret = kdbus_NameQuery(name, dbus_connection_get_transport(connection), &info);
+          if((inter_ret == 0) || (inter_ret == -ESRCH) || (inter_ret == -ENXIO))
+            service_exists = (inter_ret == 0) ? TRUE : FALSE;
+          else
+            {
+              _dbus_verbose("kdbus error checking if name exists: err %d (%m)\n", errno);
+              dbus_set_error (error, DBUS_ERROR_FAILED, "Could not determine whether name '%s' exists", name);
+              service_exists = FALSE;
+            }
+          free(info.sec_label);
+        }
+      else
+  #endif
+      {
+        _dbus_string_init_const (&service_name, name);
+        service = bus_registry_lookup (registry, &service_name);
+        service_exists = service != NULL;
+      }
     }
 
   reply = dbus_message_new_method_return (message);
@@ -879,6 +1084,21 @@ bus_driver_handle_update_activation_environment (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
+  if (!bus_driver_check_message_is_for_us (message, error))
+    return FALSE;
+
+#ifdef DBUS_UNIX
+    {
+      /* UpdateActivationEnvironment is basically a recipe for privilege
+       * escalation so let's be extra-careful: do not allow the sysadmin
+       * to shoot themselves in the foot.
+       */
+      if (!bus_driver_check_caller_is_privileged (connection, transaction,
+                                                  message, error))
+        return FALSE;
+    }
+#endif
+
   activation = bus_connection_get_activation (connection);
 
   dbus_message_iter_init (message, &iter);
@@ -886,13 +1106,7 @@ bus_driver_handle_update_activation_environment (DBusConnection *connection,
   /* The message signature has already been checked for us,
    * so let's just assert it's right.
    */
-#ifndef DBUS_DISABLE_ASSERT
-    {
-      int msg_type = dbus_message_iter_get_arg_type (&iter);
-
-      _dbus_assert (msg_type == DBUS_TYPE_ARRAY);
-    }
-#endif
+  _dbus_assert (dbus_message_iter_get_arg_type (&iter) == DBUS_TYPE_ARRAY);
 
   dbus_message_iter_recurse (&iter, &dict_iter);
 
@@ -1029,9 +1243,20 @@ bus_driver_handle_add_match (DBusConnection *connection,
 
   _dbus_string_init_const (&str, text);
 
-  rule = bus_match_rule_parse (connection, &str, error);
-  if (rule == NULL)
-    goto failed;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      _dbus_verbose("Unsupported AddMatch method called by %s\n", dbus_message_get_sender(message));
+      dbus_set_error(error, DBUS_ERROR_NOT_SUPPORTED, "AddMatch method must be implemented in lib when on kdbus.");
+      goto failed;
+    }
+  else
+#endif
+    {
+      rule = bus_match_rule_parse (connection, &str, error);
+      if (rule == NULL)
+        goto failed;
+    }
 
   matchmaker = bus_connection_get_matchmaker (connection);
 
@@ -1085,16 +1310,27 @@ bus_driver_handle_remove_match (DBusConnection *connection,
 
   _dbus_string_init_const (&str, text);
 
-  rule = bus_match_rule_parse (connection, &str, error);
-  if (rule == NULL)
-    goto failed;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      _dbus_verbose("Unsupported RemoveMatch method called by %s\n", dbus_message_get_sender(message));
+      dbus_set_error(error, DBUS_ERROR_NOT_SUPPORTED, "RemoveMatch method must be implemented in lib when on kdbus.");
+      goto failed;
+    }
+  else
+#endif
+    {
+      rule = bus_match_rule_parse (connection, &str, error);
+      if (rule == NULL)
+        goto failed;
 
-  /* Send the ack before we remove the rule, since the ack is undone
-   * on transaction cancel, but rule removal isn't.
-   */
-  if (!send_ack_reply (connection, transaction,
-                       message, error))
-    goto failed;
+      /* Send the ack before we remove the rule, since the ack is undone
+       * on transaction cancel, but rule removal isn't.
+       */
+      if (!send_ack_reply (connection, transaction,
+                           message, error))
+        goto failed;
+    }
 
   matchmaker = bus_connection_get_matchmaker (connection);
 
@@ -1124,6 +1360,9 @@ bus_driver_handle_get_service_owner (DBusConnection *connection,
   BusRegistry *registry;
   BusService *service;
   DBusMessage *reply;
+#ifdef ENABLE_KDBUS_TRANSPORT
+  char unique_name[(unsigned int)(snprintf((char*)base_name, 0, "%llu", ULLONG_MAX) + sizeof(":1."))];
+#endif
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
@@ -1137,35 +1376,69 @@ bus_driver_handle_get_service_owner (DBusConnection *connection,
 			       DBUS_TYPE_INVALID))
       goto failed;
 
-  _dbus_string_init_const (&str, text);
-  service = bus_registry_lookup (registry, &str);
-  if (service == NULL &&
-      _dbus_string_equal_c_str (&str, DBUS_SERVICE_DBUS))
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
     {
-      /* ORG_FREEDESKTOP_DBUS owns itself */
-      base_name = DBUS_SERVICE_DBUS;
-    }
-  else if (service == NULL)
-    {
-      dbus_set_error (error,
-                      DBUS_ERROR_NAME_HAS_NO_OWNER,
-                      "Could not get owner of name '%s': no such name", text);
-      goto failed;
-    }
-  else
-    {
-      base_name = bus_connection_get_name (bus_service_get_primary_owners_connection (service));
-      if (base_name == NULL)
+      int ret;
+
+      _dbus_string_init_const (&str, text);
+      if (_dbus_string_equal_c_str (&str, DBUS_SERVICE_DBUS))
         {
-          /* FIXME - how is this error possible? */
-          dbus_set_error (error,
-                          DBUS_ERROR_FAILED,
-                          "Could not determine unique name for '%s'", text);
+          /* ORG_FREEDESKTOP_DBUS owns itself */
+          base_name = DBUS_SERVICE_DBUS;
+          goto send_reply;
+        }
+
+      ret = kdbus_get_name_owner(dbus_connection_get_transport(connection), text, unique_name);
+      if(ret == 0)
+        base_name = unique_name;
+      else if((ret == -ESRCH) || (ret == -ENXIO)) //name has no owner
+        {
+          dbus_set_error (error, DBUS_ERROR_NAME_HAS_NO_OWNER,
+                  "Could not get owner of name '%s': no such name", text);
           goto failed;
         }
-      _dbus_assert (*base_name == ':');
+      else
+        {
+          dbus_set_error (error, DBUS_ERROR_FAILED,
+                  "Could not determine unique name for '%s'", text);
+          goto failed;
+        }
+    }
+  else
+#endif
+    {
+    _dbus_string_init_const (&str, text);
+    service = bus_registry_lookup (registry, &str);
+    if (service == NULL &&
+        _dbus_string_equal_c_str (&str, DBUS_SERVICE_DBUS))
+      {
+        /* ORG_FREEDESKTOP_DBUS owns itself */
+        base_name = DBUS_SERVICE_DBUS;
+      }
+    else if (service == NULL)
+      {
+        dbus_set_error (error,
+                        DBUS_ERROR_NAME_HAS_NO_OWNER,
+                        "Could not get owner of name '%s': no such name", text);
+        goto failed;
+      }
+    else
+      {
+        base_name = bus_connection_get_name (bus_service_get_primary_owners_connection (service));
+        if (base_name == NULL)
+          {
+            /* FIXME - how is this error possible? */
+            dbus_set_error (error,
+                            DBUS_ERROR_FAILED,
+                            "Could not determine unique name for '%s'", text);
+            goto failed;
+          }
+        _dbus_assert (*base_name == ':');
+      }
     }
 
+send_reply:
   _dbus_assert (base_name != NULL);
 
   reply = dbus_message_new_method_return (message);
@@ -1223,28 +1496,66 @@ bus_driver_handle_list_queued_owners (DBusConnection *connection,
 			       DBUS_TYPE_INVALID))
       goto failed;
 
-  _dbus_string_init_const (&str, text);
-  service = bus_registry_lookup (registry, &str);
-  if (service == NULL &&
-      _dbus_string_equal_c_str (&str, DBUS_SERVICE_DBUS))
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
     {
-      /* ORG_FREEDESKTOP_DBUS owns itself */
-      if (! _dbus_list_append (&base_names, dbus_service_name))
-        goto oom;
-    }
-  else if (service == NULL)
-    {
-      dbus_set_error (error,
-                      DBUS_ERROR_NAME_HAS_NO_OWNER,
-                      "Could not get owners of name '%s': no such name", text);
-      goto failed;
+      char unique_name[(unsigned int)(snprintf((char*)dbus_service_name, 0, "%llu", ULLONG_MAX) + sizeof(":1."))];
+      int ret;
+
+      /* For kdbus we have to add primary owner to the list manually, because
+       * standard DBus does this automatically but kdbus do not. */
+      ret = kdbus_get_name_owner(dbus_connection_get_transport(connection), text, unique_name);
+      if(ret == 0)
+        {
+          char *uname = NULL;
+
+          if(asprintf(&uname, "%s", unique_name) < 0)
+             goto failed;
+
+          if (!_dbus_list_append (&base_names, uname))
+            goto failed;
+        }
+      else if((ret == -ESRCH) || (ret == -ENXIO)) //name has no owner
+        {
+          dbus_set_error (error, DBUS_ERROR_NAME_HAS_NO_OWNER,
+                  "Could not get owner of name '%s': no such name", text);
+          goto failed;
+        }
+      else
+        {
+          dbus_set_error (error, DBUS_ERROR_FAILED,
+                  "Could not determine unique name for '%s'", text);
+          goto failed;
+        }
+      if(!kdbus_list_queued (dbus_connection_get_transport(connection),  &base_names, text ,error))
+        goto failed;
     }
   else
+#endif
     {
-      if (!bus_service_list_queued_owners (service,
-                                           &base_names,
-                                           error))
-        goto failed;
+      _dbus_string_init_const (&str, text);
+      service = bus_registry_lookup (registry, &str);
+      if (service == NULL &&
+          _dbus_string_equal_c_str (&str, DBUS_SERVICE_DBUS))
+        {
+          /* ORG_FREEDESKTOP_DBUS owns itself */
+          if (! _dbus_list_append (&base_names, dbus_service_name))
+            goto oom;
+        }
+      else if (service == NULL)
+        {
+          dbus_set_error (error,
+                          DBUS_ERROR_NAME_HAS_NO_OWNER,
+                          "Could not get owners of name '%s': no such name", text);
+          goto failed;
+        }
+      else
+        {
+          if (!bus_service_list_queued_owners (service,
+                  &base_names,
+                  error))
+            goto failed;
+        }
     }
 
   _dbus_assert (base_names != NULL);
@@ -1285,6 +1596,23 @@ bus_driver_handle_list_queued_owners (DBusConnection *connection,
 
   dbus_message_unref (reply);
 
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
+    {
+      link = _dbus_list_get_first_link (&base_names);
+      while (link != NULL)
+        {
+          DBusList *next = _dbus_list_get_next_link (&base_names, link);
+
+          if(link->data != NULL)
+            free(link->data);
+
+          _dbus_list_free_link (link);
+          link = next;
+        }
+    }
+#endif
+
   return TRUE;
 
  oom:
@@ -1315,24 +1643,36 @@ bus_driver_handle_get_connection_unix_user (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  reply = NULL;
-
-  conn = bus_driver_get_conn_helper (connection, message, "UID", &service,
-                                     error);
-
-  if (conn == NULL)
-    goto failed;
-
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
     goto oom;
 
-  if (!dbus_connection_get_unix_user (conn, &uid))
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if (bus_context_is_kdbus (bus_transaction_get_context (transaction)))
     {
-      dbus_set_error (error,
-                      DBUS_ERROR_FAILED,
-                      "Could not determine UID for '%s'", service);
-      goto failed;
+      const char* name;
+
+      if (!dbus_message_get_args (message, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID))
+        goto failed;
+      if (!kdbus_connection_get_unix_user (connection, name, &uid, error))
+        goto failed;
+    }
+  else
+#endif
+    {
+      conn = bus_driver_get_conn_helper (connection, message, "UID", &service,
+                                         error);
+
+      if (conn == NULL)
+        goto failed;
+
+      if (!dbus_connection_get_unix_user (conn, &uid))
+        {
+          dbus_set_error (error,
+                          DBUS_ERROR_FAILED,
+                          "Could not determine UID for '%s'", service);
+          goto failed;
+        }
     }
 
   uid32 = uid;
@@ -1372,24 +1712,35 @@ bus_driver_handle_get_connection_unix_process_id (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  reply = NULL;
-
-  conn = bus_driver_get_conn_helper (connection, message, "PID", &service,
-                                     error);
-
-  if (conn == NULL)
-    goto failed;
-
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
     goto oom;
-
-  if (!dbus_connection_get_unix_process_id (conn, &pid))
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if (bus_context_is_kdbus (bus_transaction_get_context (transaction)))
     {
-      dbus_set_error (error,
-                      DBUS_ERROR_UNIX_PROCESS_ID_UNKNOWN,
-                      "Could not determine PID for '%s'", service);
-      goto failed;
+      const char* name;
+
+      if (!dbus_message_get_args (message, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID))
+        goto failed;
+      if (!kdbus_connection_get_unix_process_id (connection, name, &pid, error))
+        goto failed;
+    }
+  else
+#endif
+    {
+      conn = bus_driver_get_conn_helper (connection, message, "PID", &service,
+                                         error);
+
+      if (conn == NULL)
+        goto failed;
+
+      if (!dbus_connection_get_unix_process_id (conn, &pid))
+        {
+          dbus_set_error (error,
+                          DBUS_ERROR_UNIX_PROCESS_ID_UNKNOWN,
+                          "Could not determine PID for '%s'", service);
+          goto failed;
+        }
     }
 
   pid32 = pid;
@@ -1484,29 +1835,38 @@ bus_driver_handle_get_connection_selinux_security_context (DBusConnection *conne
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  reply = NULL;
-
-  conn = bus_driver_get_conn_helper (connection, message, "security context",
-                                     &service, error);
-
-  if (conn == NULL)
-    goto failed;
-
   reply = dbus_message_new_method_return (message);
   if (reply == NULL)
     goto oom;
 
-  context = bus_connection_get_selinux_id (conn);
-  if (!context)
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(bus_context_is_kdbus(bus_transaction_get_context (transaction)))
     {
-      dbus_set_error (error,
-                      DBUS_ERROR_SELINUX_SECURITY_CONTEXT_UNKNOWN,
-                      "Could not determine security context for '%s'", service);
-      goto failed;
+      if(!kdbus_get_connection_unix_selinux_security_context(dbus_connection_get_transport(connection),
+                                                             message, reply, error))
+        goto failed;
     }
+  else
+#endif
+    {
+      conn = bus_driver_get_conn_helper (connection, message, "security context",
+                                         &service, error);
 
-  if (! bus_selinux_append_context (reply, context, error))
-    goto failed;
+      if (conn == NULL)
+        goto failed;
+
+      context = bus_connection_get_selinux_id (conn);
+      if (!context)
+        {
+          dbus_set_error (error,
+                          DBUS_ERROR_SELINUX_SECURITY_CONTEXT_UNKNOWN,
+                          "Could not determine security context for '%s'", service);
+          goto failed;
+        }
+
+      if (! bus_selinux_append_context (reply, context, error))
+        goto failed;
+  }
 
   if (! bus_transaction_send_from_driver (transaction, connection, reply))
     goto oom;
@@ -1541,40 +1901,82 @@ bus_driver_handle_get_connection_credentials (DBusConnection *connection,
 
   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
 
-  reply = NULL;
-
-  conn = bus_driver_get_conn_helper (connection, message, "credentials",
-                                     &service, error);
-
-  if (conn == NULL)
-    goto failed;
-
   reply = _dbus_asv_new_method_return (message, &reply_iter, &array_iter);
   if (reply == NULL)
     goto oom;
 
-  /* we can't represent > 32-bit pids */
-  if (dbus_connection_get_unix_process_id (conn, &ulong_val) &&
-      ulong_val <= _DBUS_UINT32_MAX)
+#ifdef ENABLE_KDBUS_TRANSPORT
+  if(!bus_context_is_kdbus(bus_transaction_get_context (transaction)))
     {
-      if (!_dbus_asv_add_uint32 (&array_iter, "UnixProcessID", ulong_val))
-        goto oom;
-    }
+#endif
+      conn = bus_driver_get_conn_helper (connection, message, "credentials",
+                                         &service, error);
 
-  /* we can't represent > 32-bit uids */
-  if (dbus_connection_get_unix_user (conn, &ulong_val) &&
-      ulong_val <= _DBUS_UINT32_MAX)
-    {
-      if (!_dbus_asv_add_uint32 (&array_iter, "UnixUserID", ulong_val))
-        goto oom;
-    }
+      if (conn == NULL)
+        goto failed;
 
-  smack_ctx = bus_connection_get_smack_label (conn);
-  if (smack_ctx)
+      /* we can't represent > 32-bit pids; if your system needs them, please
+       * add ProcessID64 to the spec or something */
+      if (dbus_connection_get_unix_process_id (conn, &ulong_val) &&
+                                               ulong_val <= _DBUS_UINT32_MAX)
+        {
+          if (!_dbus_asv_add_uint32 (&array_iter, "ProcessID", ulong_val))
+            goto oom;
+        }
+
+      /* we can't represent > 32-bit uids; if your system needs them, please
+       * add UnixUserID64 to the spec or something */
+      if (dbus_connection_get_unix_user (conn, &ulong_val) &&
+                                         ulong_val <= _DBUS_UINT32_MAX)
+        {
+          if (!_dbus_asv_add_uint32 (&array_iter, "UnixUserID", ulong_val))
+            goto oom;
+        }
+
+      smack_ctx = bus_connection_get_smack_label (conn);
+      if (smack_ctx)
+        {
+          if (!_dbus_asv_add_string(&array_iter, "SmackContext", smack_ctx))
+            goto oom;
+        }
+
+#ifdef ENABLE_KDBUS_TRANSPORT
+  }
+  else
     {
-      if (!_dbus_asv_add_string(&array_iter, "SmackContext", smack_ctx))
-        goto oom;
-    }
+      const char* name;
+
+      if (!dbus_message_get_args (message, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID))
+        goto failed;
+      if (kdbus_connection_get_unix_process_id (connection, name, &ulong_val, error))
+        {
+          if (!_dbus_asv_add_uint32 (&array_iter, "ProcessID", ulong_val))
+            goto oom;
+        }
+      else
+        goto failed;
+
+      if (kdbus_connection_get_unix_user (connection, name, &ulong_val, error))
+        {
+          if (!_dbus_asv_add_uint32 (&array_iter, "UnixUserID", ulong_val))
+            goto oom;
+        }
+      else
+        goto failed;
+
+/* todo below has no direct equivalent in kdbus
+ * potentially could be implemented with ITEM_SECLABEL,
+
+     smack_ctx = bus_connection_get_smack_label (conn);
+     if (smack_ctx)
+       {
+         if (!_dbus_asv_add_string(&array_iter, "SmackContext", smack_ctx))
+           goto oom;
+       }
+*/
+
+   }
+#endif
 
   if (!_dbus_asv_close (&reply_iter, &array_iter))
     goto oom;
@@ -1697,6 +2099,117 @@ bus_driver_handle_get_id (DBusConnection *connection,
   return FALSE;
 }
 
+static dbus_bool_t
+bus_driver_handle_become_monitor (DBusConnection *connection,
+                                  BusTransaction *transaction,
+                                  DBusMessage    *message,
+                                  DBusError      *error)
+{
+  char **match_rules = NULL;
+  BusMatchRule *rule;
+  DBusList *rules = NULL;
+  DBusList *iter;
+  DBusString str;
+  int i;
+  int n_match_rules;
+  dbus_uint32_t flags;
+  dbus_bool_t ret = FALSE;
+
+  _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+
+  if (!bus_driver_check_message_is_for_us (message, error))
+    goto out;
+
+  if (!bus_driver_check_caller_is_privileged (connection, transaction,
+                                              message, error))
+    goto out;
+
+  if (!dbus_message_get_args (message, error,
+        DBUS_TYPE_ARRAY, DBUS_TYPE_STRING, &match_rules, &n_match_rules,
+        DBUS_TYPE_UINT32, &flags,
+        DBUS_TYPE_INVALID))
+    goto out;
+
+  if (flags != 0)
+    {
+      dbus_set_error (error, DBUS_ERROR_INVALID_ARGS,
+          "BecomeMonitor does not support any flags yet");
+      goto out;
+    }
+
+  /* Special case: a zero-length array becomes [""] */
+  if (n_match_rules == 0)
+    {
+      match_rules = dbus_malloc (2 * sizeof (char *));
+
+      if (match_rules == NULL)
+        {
+          BUS_SET_OOM (error);
+          goto out;
+        }
+
+      match_rules[0] = _dbus_strdup ("");
+
+      if (match_rules[0] == NULL)
+        {
+          BUS_SET_OOM (error);
+          goto out;
+        }
+
+      match_rules[1] = NULL;
+      n_match_rules = 1;
+    }
+
+  for (i = 0; i < n_match_rules; i++)
+    {
+      _dbus_string_init_const (&str, match_rules[i]);
+      rule = bus_match_rule_parse (connection, &str, error);
+
+      if (rule == NULL)
+        {
+          BUS_SET_OOM (error);
+          goto out;
+        }
+
+      /* monitors always eavesdrop */
+      bus_match_rule_set_client_is_eavesdropping (rule, TRUE);
+
+      if (!_dbus_list_append (&rules, rule))
+        {
+          BUS_SET_OOM (error);
+          bus_match_rule_unref (rule);
+          goto out;
+        }
+    }
+
+  /* Send the ack before we remove the rule, since the ack is undone
+   * on transaction cancel, but becoming a monitor isn't.
+   */
+  if (!send_ack_reply (connection, transaction, message, error))
+    goto out;
+
+  if (!bus_connection_be_monitor (connection, transaction, &rules, error))
+    goto out;
+
+  ret = TRUE;
+
+out:
+  if (ret)
+    _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+  else
+    _DBUS_ASSERT_ERROR_IS_SET (error);
+
+  for (iter = _dbus_list_get_first_link (&rules);
+      iter != NULL;
+      iter = _dbus_list_get_next_link (&rules, iter))
+    bus_match_rule_unref (iter->data);
+
+  _dbus_list_clear (&rules);
+
+  dbus_free_string_array (match_rules);
+  return ret;
+}
+
 typedef struct
 {
   const char *name;
@@ -1798,6 +2311,11 @@ static const MessageHandler introspectable_message_handlers[] = {
   { NULL, NULL, NULL, NULL }
 };
 
+static const MessageHandler monitoring_message_handlers[] = {
+  { "BecomeMonitor", "asu", "", bus_driver_handle_become_monitor },
+  { NULL, NULL, NULL, NULL }
+};
+
 #ifdef DBUS_ENABLE_STATS
 static const MessageHandler stats_message_handlers[] = {
   { "GetStats", "", "a{sv}", bus_stats_handle_get_stats },
@@ -1828,6 +2346,7 @@ static InterfaceHandler interface_handlers[] = {
     "      <arg type=\"s\"/>\n"
     "    </signal>\n" },
   { DBUS_INTERFACE_INTROSPECTABLE, introspectable_message_handlers, NULL },
+  { DBUS_INTERFACE_MONITORING, monitoring_message_handlers, NULL },
 #ifdef DBUS_ENABLE_STATS
   { BUS_INTERFACE_STATS, stats_message_handlers, NULL },
 #endif
@@ -1978,6 +2497,38 @@ bus_driver_handle_introspect (DBusConnection *connection,
   return FALSE;
 }
 
+/*
+ * Set @error and return FALSE if the message is not directed to the
+ * dbus-daemon by its canonical object path. This is hardening against
+ * system services with poorly-written security policy files, which
+ * might allow sending dangerously broad equivalence classes of messages
+ * such as "anything with this assumed-to-be-safe object path".
+ *
+ * dbus-daemon is unusual in that it normally ignores the object path
+ * of incoming messages; we need to keep that behaviour for the "read"
+ * read-only method calls like GetConnectionUnixUser for backwards
+ * compatibility, but it seems safer to be more restrictive for things
+ * intended to be root-only or privileged-developers-only.
+ *
+ * It is possible that there are other system services with the same
+ * quirk as dbus-daemon.
+ */
+dbus_bool_t
+bus_driver_check_message_is_for_us (DBusMessage *message,
+                                    DBusError   *error)
+{
+  if (!dbus_message_has_path (message, DBUS_PATH_DBUS))
+    {
+      dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED,
+          "Method '%s' is only available at the canonical object path '%s'",
+          dbus_message_get_member (message), DBUS_PATH_DBUS);
+
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
 dbus_bool_t
 bus_driver_handle_message (DBusConnection *connection,
                            BusTransaction *transaction,
@@ -2015,13 +2566,8 @@ bus_driver_handle_message (DBusConnection *connection,
   _dbus_verbose ("Driver got a method call: %s\n", name);
 
   /* security checks should have kept this from getting here */
-#ifndef DBUS_DISABLE_ASSERT
-    {
-      const char *sender = dbus_message_get_sender (message);
-
-      _dbus_assert (sender != NULL || strcmp (name, "Hello") == 0);
-    }
-#endif
+  _dbus_assert (dbus_message_get_sender (message) != NULL ||
+                strcmp (name, "Hello") == 0);
 
   for (ih = interface_handlers; ih->name != NULL; ih++)
     {

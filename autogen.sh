@@ -15,8 +15,8 @@ DIE=0
 
 if [ -f .git/hooks/pre-commit.sample -a ! -f .git/hooks/pre-commit ] ; then
     echo "Activating pre-commit hook."
-    cp -av .git/hooks/pre-commit.sample .git/hooks/pre-commit
-    chmod -c +x  .git/hooks/pre-commit
+    cp .git/hooks/pre-commit.sample .git/hooks/pre-commit
+    chmod +x .git/hooks/pre-commit
 fi
 
 (autoconf --version) < /dev/null > /dev/null 2>&1 || {
@@ -48,7 +48,7 @@ fi
 }
 
 LIBTOOLIZE=`which libtoolize`
-if ! test -f $LIBTOOLIZE; then
+if ! test -f "$LIBTOOLIZE"; then
 	LIBTOOLIZE=`which glibtoolize`
 fi
 
@@ -101,11 +101,5 @@ else
 fi
 
 if $run_configure; then
-    $srcdir/configure --enable-developer --config-cache "$@"
-    echo 
-    echo "Now type 'make' to compile $PROJECT."
-else
-    echo
-    echo "Now run 'configure' and 'make' to compile $PROJECT."
+    $srcdir/configure --config-cache "$@"
 fi
-

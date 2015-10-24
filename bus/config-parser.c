@@ -30,6 +30,7 @@
 #include "selinux.h"
 #include <dbus/dbus-list.h>
 #include <dbus/dbus-internals.h>
+#include <dbus/dbus-misc.h>
 #include <dbus/dbus-sysdeps.h>
 #include <string.h>
 
@@ -44,7 +45,7 @@ typedef enum
   POLICY_USER,
   POLICY_GROUP,
   POLICY_CONSOLE,
-  POLICY_SMACK
+  POLICY_SMACK,
 } PolicyType;
 
 typedef struct
@@ -65,7 +66,7 @@ typedef struct
     struct
     {
       PolicyType type;
-      unsigned long gid_uid_or_at_console;
+      unsigned long gid_uid_or_at_console;      
       char *smack_label;
     } policy;
 
@@ -321,13 +322,23 @@ merge_included (BusConfigParser *parser,
   if (included->keep_umask)
     parser->keep_umask = TRUE;
 
+  if (included->allow_anonymous)
+    parser->allow_anonymous = TRUE;
+
   if (included->pidfile != NULL)
     {
       dbus_free (parser->pidfile);
       parser->pidfile = included->pidfile;
       included->pidfile = NULL;
     }
-  
+
+  if (included->servicehelper != NULL)
+    {
+      dbus_free (parser->servicehelper);
+      parser->servicehelper = included->servicehelper;
+      included->servicehelper = NULL;
+    }
+
   while ((link = _dbus_list_pop_first_link (&included->listen_on)))
     _dbus_list_append_link (&parser->listen_on, link);
 
@@ -417,9 +428,9 @@ bus_config_parser_new (const DBusString      *basedir,
       maximum number of file descriptors we can receive. Picking a
       high value here thus translates directly to more memory
       allocation. */
-      parser->limits.max_incoming_unix_fds = 1024*4;
-      parser->limits.max_outgoing_unix_fds = 1024*4;
-      parser->limits.max_message_unix_fds = 1024;
+      parser->limits.max_incoming_unix_fds = DBUS_DEFAULT_MESSAGE_UNIX_FDS*4;
+      parser->limits.max_outgoing_unix_fds = DBUS_DEFAULT_MESSAGE_UNIX_FDS*4;
+      parser->limits.max_message_unix_fds = DBUS_DEFAULT_MESSAGE_UNIX_FDS;
       
       /* Making this long means the user has to wait longer for an error
        * message if something screws up, but making it too short means
@@ -432,9 +443,14 @@ bus_config_parser_new (const DBusString      *basedir,
        * password) is allowed, then potentially it has to be quite long.
        */
       parser->limits.auth_timeout = 30000; /* 30 seconds */
+
+      /* Do not allow a fd to stay forever in dbus-daemon
+       * https://bugs.freedesktop.org/show_bug.cgi?id=80559
+       */
+      parser->limits.pending_fd_timeout = 150000; /* 2.5 minutes */
       
       parser->limits.max_incomplete_connections = 64;
-      parser->limits.max_connections_per_user = 256;
+      parser->limits.max_connections_per_user = 512;
       
       /* Note that max_completed_connections / max_connections_per_user
        * is the number of users that would have to work together to
@@ -998,8 +1014,14 @@ start_busconfig_child (BusConfigParser   *parser,
                               NULL))
         return FALSE;
 
-      if (((context != NULL) + (user != NULL) + (group != NULL) +
-           (smack != NULL) + (at_console != NULL)) != 1)
+      if (((context && user) ||
+           (context && group) ||
+           (context && smack) ||
+           (context && at_console)) ||
+           ((user && group) ||
+           (user && at_console)) ||
+           (group && at_console) ||
+          !(context || user || group || smack || at_console))
         {
           dbus_set_error (error, DBUS_ERROR_FAILED,
                           "<policy> element must have exactly one of (context|user|group|at_console|smack) attributes");
@@ -1649,6 +1671,7 @@ append_rule_from_element (BusConfigParser   *parser,
                                                rule))
             goto nomem;
           break;
+
         case POLICY_SMACK:
           if (!bus_policy_append_smack_rule (parser->policy, pe->d.policy.smack_label, rule))
             goto nomem;
@@ -1905,6 +1928,12 @@ set_limit (BusConfigParser *parser,
       must_be_positive = TRUE;
       must_be_int = TRUE;
       parser->limits.auth_timeout = value;
+    }
+  else if (strcmp (name, "pending_fd_timeout") == 0)
+    {
+      must_be_positive = TRUE;
+      must_be_int = TRUE;
+      parser->limits.pending_fd_timeout = value;
     }
   else if (strcmp (name, "reply_timeout") == 0)
     {
@@ -2750,7 +2779,7 @@ bus_config_parser_steal_service_context_table (BusConfigParser *parser)
   return table;
 }
 
-#ifdef DBUS_BUILD_TESTS
+#ifdef DBUS_ENABLE_EMBEDDED_TESTS
 #include <stdio.h>
 
 typedef enum
@@ -3112,6 +3141,7 @@ limits_equal (const BusLimits *a,
      || a->max_message_unix_fds == b->max_message_unix_fds
      || a->activation_timeout == b->activation_timeout
      || a->auth_timeout == b->auth_timeout
+     || a->pending_fd_timeout == b->pending_fd_timeout
      || a->max_completed_connections == b->max_completed_connections
      || a->max_incomplete_connections == b->max_incomplete_connections
      || a->max_connections_per_user == b->max_connections_per_user
@@ -3425,10 +3455,10 @@ test_default_session_servicedirs (void)
     }
 
 #ifdef DBUS_UNIX
-  if (!_dbus_setenv ("XDG_DATA_HOME", "/testhome/foo/.testlocal/testshare"))
+  if (!dbus_setenv ("XDG_DATA_HOME", "/testhome/foo/.testlocal/testshare"))
     _dbus_assert_not_reached ("couldn't setenv XDG_DATA_HOME");
 
-  if (!_dbus_setenv ("XDG_DATA_DIRS", ":/testusr/testlocal/testshare: :/testusr/testshare:"))
+  if (!dbus_setenv ("XDG_DATA_DIRS", ":/testusr/testlocal/testshare: :/testusr/testshare:"))
     _dbus_assert_not_reached ("couldn't setenv XDG_DATA_DIRS");
 #endif
   if (!_dbus_get_standard_session_servicedirs (&dirs))
@@ -3558,10 +3588,10 @@ test_default_system_servicedirs (void)
     }
 
 #ifdef DBUS_UNIX
-  if (!_dbus_setenv ("XDG_DATA_HOME", "/testhome/foo/.testlocal/testshare"))
+  if (!dbus_setenv ("XDG_DATA_HOME", "/testhome/foo/.testlocal/testshare"))
     _dbus_assert_not_reached ("couldn't setenv XDG_DATA_HOME");
 
-  if (!_dbus_setenv ("XDG_DATA_DIRS", ":/testusr/testlocal/testshare: :/testusr/testshare:"))
+  if (!dbus_setenv ("XDG_DATA_DIRS", ":/testusr/testlocal/testshare: :/testusr/testshare:"))
     _dbus_assert_not_reached ("couldn't setenv XDG_DATA_DIRS");
 #endif
   if (!_dbus_get_standard_system_servicedirs (&dirs))
@@ -3644,5 +3674,5 @@ bus_config_parser_test (const DBusString *test_data_dir)
   return TRUE;
 }
 
-#endif /* DBUS_BUILD_TESTS */
+#endif /* DBUS_ENABLE_EMBEDDED_TESTS */
 
